@@ -23,6 +23,11 @@ pub fn setup(app: &AppHandle) -> tauri::Result<()> {
 }
 
 pub fn build_menu(app: &AppHandle, lang: &str) -> tauri::Result<Menu<Wry>> {
+    let hidden = {
+        let st = app.state::<crate::AppState>();
+        let c = st.cfg.lock().unwrap();
+        c.hidden
+    };
     let install = MenuItemBuilder::with_id("install", tr(lang, "install")).build(app)?;
     let uninstall = MenuItemBuilder::with_id("uninstall", tr(lang, "uninstall")).build(app)?;
     let l_auto = CheckMenuItemBuilder::with_id("lang-auto", tr(lang, "lang_auto"))
@@ -49,6 +54,9 @@ pub fn build_menu(app: &AppHandle, lang: &str) -> tauri::Result<Menu<Wry>> {
     let auto = CheckMenuItemBuilder::with_id("autostart", tr(lang, "autostart"))
         .checked(crate::autostart::is_enabled())
         .build(app)?;
+    let hide = CheckMenuItemBuilder::with_id("hide", tr(lang, "hide_notch"))
+        .checked(hidden)
+        .build(app)?;
     let quit = MenuItemBuilder::with_id("quit", tr(lang, "quit")).build(app)?;
     MenuBuilder::new(app)
         .items(&[&install, &uninstall])
@@ -58,6 +66,7 @@ pub fn build_menu(app: &AppHandle, lang: &str) -> tauri::Result<Menu<Wry>> {
         .item(&reset)
         .item(&open_data)
         .item(&auto)
+        .item(&hide)
         .separator()
         .item(&quit)
         .build()
@@ -114,6 +123,15 @@ fn handle(app: &AppHandle, id: &str) {
             };
             notice(app, r);
             refresh_menu(app); // refresh the check marks
+        }
+        "hide" => {
+            let current = {
+                let st = app.state::<crate::AppState>();
+                let h = st.cfg.lock().unwrap().hidden;
+                h
+            };
+            crate::set_notch_hidden(app, !current); // persists + tells the page to swap its CSS
+            refresh_menu(app); // refresh the check mark
         }
         "quit" => app.exit(0),
         _ if id.starts_with("lang-") => crate::apply_lang(app, &id[5..]),
