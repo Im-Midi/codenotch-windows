@@ -21,6 +21,9 @@ pub struct Config {
     /// Vertical position of the notch: the window centre as a fraction of the primary monitor's height (0 = top, 1 = bottom), default 0.5; saved after a drag
     #[serde(default = "default_notch_y")]
     pub notch_y: f64,
+    /// Notch window hidden via the tray toggle; persists across restarts (tray icon and hooks keep working while hidden)
+    #[serde(default)]
+    pub hidden: bool,
 }
 
 fn default_notch_y() -> f64 {
@@ -44,6 +47,7 @@ impl Default for Config {
             bar_w: None,
             drag_enabled: false,
             notch_y: default_notch_y(),
+            hidden: false,
         }
     }
 }

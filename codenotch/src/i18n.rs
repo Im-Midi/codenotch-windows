@@ -35,6 +35,9 @@ pub fn tr(lang: &str, key: &str) -> &'static str {
         ("zh", "autostart") => "开机自启（静默待命）",
         ("ja", "autostart") => "Windows起動時に自動開始",
         ("ko", "autostart") => "Windows 시작 시 자동 실행",
+        ("zh", "hide_notch") => "隐藏悬浮条",
+        ("ja", "hide_notch") => "ノッチを非表示",
+        ("ko", "hide_notch") => "노치 숨기기",
         ("zh", "refresh") => "立即刷新用量",
         ("zh", "open_data") => "打开数据文件夹（日志 / 图标）",
         ("ja", "open_data") => "データフォルダを開く（ログ / アイコン）",
@@ -65,6 +68,7 @@ pub fn tr(lang: &str, key: &str) -> &'static str {
         (_, "hooks_missing") => "Hooks not installed: tray right-click → Install Claude Code hooks (desktop app auto-fallback active)",
         (_, "autostart") => "Start with Windows (silent)",
         (_, "refresh") => "Refresh usage now",
+        (_, "hide_notch") => "Hide notch",
         _ => "?",
     }
 }

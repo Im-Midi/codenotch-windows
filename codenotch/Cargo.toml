@@ -17,8 +17,8 @@ serde_json = "1"
 tiny_http = "0.12"
 dirs = "5"
 notify = "6"
-ureq = { version = "2", features = ["json", "native-tls"] } # native-tls: the Antigravity local bridge's self-signed certificate is accepted for 127.0.0.1 only
-native-tls = "0.2"
+ureq = { version = "2", features = ["json", "tls"] } # tls (rustls): the Antigravity local bridge's self-signed certificate is accepted for 127.0.0.1 only — native-tls/Schannel was dropped after it failed that handshake with SEC_E_INVALID_TOKEN
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 png = "0.17" # application icon → PNG (provider marks taken from the installed app's resources)
 chrono = { version = "0.4", default-features = false, features = ["std", "clock"] }
 # Cursor's credential lives in state.vscdb (SQLite); bundled = compile the SQLite C sources with the crate, which adds 1–2 minutes to the first build

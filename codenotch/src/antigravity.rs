@@ -38,7 +38,7 @@
 use crate::usage::{LimitWindow, UsageSnapshot};
 use crate::AppState;
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tauri::{AppHandle, Emitter, Manager};
 
@@ -65,12 +65,62 @@ fn state_root() -> Option<PathBuf> {
     dirs::home_dir().map(|h| h.join(".gemini").join("antigravity"))
 }
 
-fn store_path() -> PathBuf {
-    crate::config::config_path().with_file_name("antigravity.json")
+/// The two install directories a per-user Squirrel-style Antigravity install can be found under —
+/// the product was renamed from "Antigravity IDE" to plain "Antigravity" partway through 2026, and
+/// a machine can genuinely have both if it never removed the old one before the new one arrived.
+const INSTALL_DIRS: [(&str, &str); 2] = [("Antigravity", "Antigravity.exe"), ("Antigravity IDE", "Antigravity IDE.exe")];
+
+fn install_exe(dir: &str, exe: &str) -> Option<PathBuf> {
+    let p = dirs::home_dir()?.join("AppData").join("Local").join("Programs").join(dir).join(exe);
+    p.is_file().then_some(p)
+}
+
+/// Which of the two rings: `Primary` is whichever install is found first (newer name preferred),
+/// `Alternate` is the other one — but only when both are genuinely present, so a machine with just
+/// one install never grows a second, redundant ring.
+pub enum Install {
+    Primary,
+    Alternate,
+}
+
+pub fn find_install(which: Install) -> Option<PathBuf> {
+    let a = install_exe(INSTALL_DIRS[0].0, INSTALL_DIRS[0].1);
+    let b = install_exe(INSTALL_DIRS[1].0, INSTALL_DIRS[1].1);
+    match which {
+        Install::Primary => a.or(b),
+        Install::Alternate => {
+            if a.is_some() && b.is_some() {
+                b
+            } else {
+                None
+            }
+        }
+    }
+}
+
+/// Ring identity: which install directory's bridge to look for, which event/AppState field to
+/// broadcast to, and which file to persist the reading under. The primary ring keeps the plain
+/// names it always had, so a single-install machine's on-disk state is untouched.
+struct Ring {
+    install_dir: &'static str,
+    event: &'static str,
+    store_name: &'static str,
+}
+const PRIMARY: Ring = Ring { install_dir: INSTALL_DIRS[0].0, event: "antigravity", store_name: "antigravity" };
+const ALTERNATE: Ring = Ring { install_dir: INSTALL_DIRS[1].0, event: "antigravity2", store_name: "antigravity2" };
+
+fn store_path(ring: &Ring) -> PathBuf {
+    crate::config::config_path().with_file_name(format!("{}.json", ring.store_name))
 }
 
 pub fn load_persisted() -> UsageSnapshot {
-    std::fs::read_to_string(store_path())
+    load_persisted_for(&PRIMARY)
+}
+pub fn load_persisted2() -> UsageSnapshot {
+    load_persisted_for(&ALTERNATE)
+}
+fn load_persisted_for(ring: &Ring) -> UsageSnapshot {
+    std::fs::read_to_string(store_path(ring))
         .ok()
         .and_then(|t| serde_json::from_str::<UsageSnapshot>(&t).ok())
         .map(|mut s| {
@@ -82,9 +132,9 @@ pub fn load_persisted() -> UsageSnapshot {
         .unwrap_or_default()
 }
 
-fn persist(s: &UsageSnapshot) {
+fn persist(ring: &Ring, s: &UsageSnapshot) {
     if let Ok(t) = serde_json::to_string_pretty(s) {
-        let _ = std::fs::write(store_path(), t);
+        let _ = std::fs::write(store_path(ring), t);
     }
 }
 
@@ -112,21 +162,28 @@ fn run_hidden(program: &str, args: &[&str]) -> String {
     cmd.output().map(|o| String::from_utf8_lossy(&o.stdout).into_owned()).unwrap_or_default()
 }
 
-/// The process table is the only source of truth: the token is on the command line and the port is written nowhere
+/// The process table is the only source of truth: the token is on the command line and the port is
+/// written nowhere. Scoped to one install directory by its ExecutablePath — with both "Antigravity"
+/// and "Antigravity IDE" possibly running at once, that's the only thing that tells their two
+/// language_server processes apart; the process name and command-line shape are otherwise identical.
 #[cfg(windows)]
-fn discover() -> Option<Endpoint> {
-    // PowerShell CIM query: one "pid<TAB>commandline" per line
+fn discover(install_dir: &str) -> Option<Endpoint> {
+    // PowerShell CIM query: one "pid<TAB>executablepath<TAB>commandline" per line
     let table = run_hidden(
         "powershell",
         &[
             "-NoProfile",
             "-NonInteractive",
             "-Command",
-            "Get-CimInstance Win32_Process -Filter \"Name LIKE '%language_server%'\" | ForEach-Object { \"$($_.ProcessId)`t$($_.CommandLine)\" }",
+            "Get-CimInstance Win32_Process -Filter \"Name LIKE '%language_server%'\" | ForEach-Object { \"$($_.ProcessId)`t$($_.ExecutablePath)`t$($_.CommandLine)\" }",
         ],
     );
-    let line = table.lines().find(|l| l.contains("--csrf_token"))?;
-    let (pid_s, cmdline) = line.split_once('\t')?;
+    let boundary = format!(r"\Programs\{install_dir}\");
+    let line = table.lines().find(|l| l.contains("--csrf_token") && l.contains(&boundary))?;
+    let mut parts = line.splitn(3, '\t');
+    let pid_s = parts.next()?;
+    let _exe_path = parts.next()?;
+    let cmdline = parts.next()?;
     let pid: u32 = pid_s.trim().parse().ok()?;
     let csrf = flag_value(cmdline, "--csrf_token")?;
     let ports = listening_ports(pid);
@@ -136,7 +193,7 @@ fn discover() -> Option<Endpoint> {
     Some(Endpoint { ports, csrf })
 }
 #[cfg(not(windows))]
-fn discover() -> Option<Endpoint> {
+fn discover(_install_dir: &str) -> Option<Endpoint> {
     let table = run_hidden("ps", &["-Ao", "pid,command"]);
     let line = table.lines().find(|l| l.contains("language_server") && l.contains("--csrf_token"))?;
     let pid: u32 = line.trim().split_whitespace().next()?.parse().ok()?;
@@ -180,14 +237,73 @@ fn listening_ports(pid: u32) -> Vec<u16> {
     ports
 }
 
-/// Loopback only: the self-signed certificate is accepted for 127.0.0.1 alone (never used for any public request)
+/// Accepts any certificate — used only for the loopback bridge (127.0.0.1), whose self-signed
+/// certificate is regenerated on every Antigravity launch and never presented to any other host.
+#[derive(Debug)]
+struct AcceptAnyCert;
+
+impl rustls::client::danger::ServerCertVerifier for AcceptAnyCert {
+    fn verify_server_cert(
+        &self,
+        _end_entity: &rustls::pki_types::CertificateDer<'_>,
+        _intermediates: &[rustls::pki_types::CertificateDer<'_>],
+        _server_name: &rustls::pki_types::ServerName<'_>,
+        _ocsp_response: &[u8],
+        _now: rustls::pki_types::UnixTime,
+    ) -> Result<rustls::client::danger::ServerCertVerified, rustls::Error> {
+        Ok(rustls::client::danger::ServerCertVerified::assertion())
+    }
+    fn verify_tls12_signature(
+        &self,
+        _message: &[u8],
+        _cert: &rustls::pki_types::CertificateDer<'_>,
+        _dss: &rustls::DigitallySignedStruct,
+    ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+        Ok(rustls::client::danger::HandshakeSignatureValid::assertion())
+    }
+    fn verify_tls13_signature(
+        &self,
+        _message: &[u8],
+        _cert: &rustls::pki_types::CertificateDer<'_>,
+        _dss: &rustls::DigitallySignedStruct,
+    ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+        Ok(rustls::client::danger::HandshakeSignatureValid::assertion())
+    }
+    fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
+        vec![
+            rustls::SignatureScheme::RSA_PKCS1_SHA1,
+            rustls::SignatureScheme::ECDSA_SHA1_Legacy,
+            rustls::SignatureScheme::RSA_PKCS1_SHA256,
+            rustls::SignatureScheme::ECDSA_NISTP256_SHA256,
+            rustls::SignatureScheme::RSA_PKCS1_SHA384,
+            rustls::SignatureScheme::ECDSA_NISTP384_SHA384,
+            rustls::SignatureScheme::RSA_PKCS1_SHA512,
+            rustls::SignatureScheme::ECDSA_NISTP521_SHA512,
+            rustls::SignatureScheme::RSA_PSS_SHA256,
+            rustls::SignatureScheme::RSA_PSS_SHA384,
+            rustls::SignatureScheme::RSA_PSS_SHA512,
+            rustls::SignatureScheme::ED25519,
+        ]
+    }
+}
+
+static CRYPTO_INIT: std::sync::Once = std::sync::Once::new();
+
+/// Loopback only: the self-signed certificate is accepted for 127.0.0.1 alone (never used for any
+/// public request). Built on rustls rather than the OS's Schannel backend (native-tls on Windows) —
+/// Schannel was observed failing this exact handshake with `SEC_E_INVALID_TOKEN`, most likely a
+/// stale session-resumption entry keyed by the port number, which Antigravity hands a brand new
+/// self-signed certificate on every launch. rustls keeps its own session cache instead of the OS's,
+/// so a reused port number cannot collide with an old certificate.
 fn local_agent() -> Option<ureq::Agent> {
-    let tls = native_tls::TlsConnector::builder()
-        .danger_accept_invalid_certs(true)
-        .danger_accept_invalid_hostnames(true)
-        .build()
-        .ok()?;
-    Some(ureq::AgentBuilder::new().tls_connector(Arc::new(tls)).timeout(Duration::from_secs(10)).build())
+    CRYPTO_INIT.call_once(|| {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+    });
+    let config = rustls::ClientConfig::builder()
+        .dangerous()
+        .with_custom_certificate_verifier(Arc::new(AcceptAnyCert))
+        .with_no_client_auth();
+    Some(ureq::AgentBuilder::new().tls_config(Arc::new(config)).timeout(Duration::from_secs(10)).build())
 }
 
 fn bridge_quota(ep: &Endpoint) -> Result<Vec<LimitWindow>, String> {
@@ -463,7 +579,7 @@ struct Runtime {
     ever_bridged: bool,
 }
 
-fn read_once(rt: &mut Runtime, prev: &UsageSnapshot) -> UsageSnapshot {
+fn read_once(rt: &mut Runtime, prev: &UsageSnapshot, install_dir: &str) -> UsageSnapshot {
     let mut snap = UsageSnapshot::default();
     // 1. Local bridge (the cached endpoint first; the port changes on every launch, so a miss is normal)
     let mut bridge_err = String::new();
@@ -485,7 +601,7 @@ fn read_once(rt: &mut Runtime, prev: &UsageSnapshot) -> UsageSnapshot {
             }
         }
     }
-    if let Some(ep) = discover() {
+    if let Some(ep) = discover(install_dir) {
         tried = true;
         match bridge_quota(&ep) {
             Ok(w) => {
@@ -556,11 +672,13 @@ fn read_once(rt: &mut Runtime, prev: &UsageSnapshot) -> UsageSnapshot {
     snap
 }
 
-fn broadcast(app: &AppHandle, snap: UsageSnapshot) {
+type FieldGetter = fn(&AppState) -> &Mutex<UsageSnapshot>;
+
+fn broadcast(app: &AppHandle, ring: &Ring, get: FieldGetter, snap: UsageSnapshot) {
     let st = app.state::<AppState>();
-    *st.antigravity.lock().unwrap() = snap.clone();
-    persist(&snap);
-    let _ = app.emit("antigravity", &snap);
+    *get(&st).lock().unwrap() = snap.clone();
+    persist(ring, &snap);
+    let _ = app.emit(ring.event, &snap);
 }
 
 fn sleep_interruptible(secs: u64) {
@@ -572,15 +690,24 @@ fn sleep_interruptible(secs: u64) {
     }
 }
 
-pub fn start(app: AppHandle) {
+/// `only_if_alternate_present`: the alternate ring has nothing to poll for and no point waiting
+/// around when a machine only has one Antigravity install — it broadcasts absent once and the
+/// thread simply ends, rather than looping forever like the primary ring does while waiting for
+/// Antigravity to first be installed.
+fn start_ring(app: AppHandle, ring: Ring, get: FieldGetter, only_if_alternate_present: bool) {
     std::thread::spawn(move || {
         {
             let st = app.state::<AppState>();
-            let snap = st.antigravity.lock().unwrap().clone();
-            let _ = app.emit("antigravity", &snap);
+            let snap = get(&st).lock().unwrap().clone();
+            let _ = app.emit(ring.event, &snap);
         }
-        if !present() {
-            broadcast(&app, UsageSnapshot { status: "absent".into(), ..Default::default() });
+        if only_if_alternate_present {
+            if find_install(Install::Alternate).is_none() {
+                broadcast(&app, &ring, get, UsageSnapshot { status: "absent".into(), ..Default::default() });
+                return;
+            }
+        } else if !present() {
+            broadcast(&app, &ring, get, UsageSnapshot { status: "absent".into(), ..Default::default() });
             loop {
                 sleep_interruptible(600);
                 if present() {
@@ -592,14 +719,24 @@ pub fn start(app: AppHandle) {
         loop {
             let prev = {
                 let st = app.state::<AppState>();
-                let s = st.antigravity.lock().unwrap().clone();
+                let s = get(&st).lock().unwrap().clone();
                 s
             };
-            let snap = read_once(&mut rt, &prev);
-            broadcast(&app, snap);
+            let snap = read_once(&mut rt, &prev, ring.install_dir);
+            broadcast(&app, &ring, get, snap);
             sleep_interruptible(POLL_SECS);
         }
     });
+}
+
+pub fn start(app: AppHandle) {
+    start_ring(app, PRIMARY, |st| &st.antigravity, false);
+}
+
+/// The second Antigravity ring — only ever does anything on a machine with both "Antigravity" and
+/// "Antigravity IDE" installed; see `Install::Alternate`.
+pub fn start2(app: AppHandle) {
+    start_ring(app, ALTERNATE, |st| &st.antigravity2, true);
 }
 
 /// For doctor: contains no secrets
@@ -607,9 +744,11 @@ pub fn probe() -> String {
     let root = state_root().map(|p| p.display().to_string()).unwrap_or_default();
     let has_root = state_root().map(|p| p.is_dir()).unwrap_or(false);
     let cred = read_credentials();
-    let ep = discover();
+    let ep = discover(PRIMARY.install_dir);
+    let alt = find_install(Install::Alternate).map(|p| format!("second install found: {}", p.display()));
+    let alt_ep = alt.as_ref().and_then(|_| discover(ALTERNATE.install_dir));
     format!(
-        "Antigravity: state dir {} ({}) | Credential Manager gemini:antigravity {} | language_server {}",
+        "Antigravity: state dir {} ({}) | Credential Manager gemini:antigravity {} | language_server {} | {}{}",
         root,
         if has_root { "present" } else { "missing" },
         match cred {
@@ -619,6 +758,11 @@ pub fn probe() -> String {
         match ep {
             Some(e) => format!("running, ports {:?}", e.ports),
             None => "not running".into(),
+        },
+        alt.unwrap_or_else(|| "single install only".into()),
+        match alt_ep {
+            Some(e) => format!(" (its language_server running, ports {:?})", e.ports),
+            None => String::new(),
         }
     )
 }

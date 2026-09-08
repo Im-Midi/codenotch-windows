@@ -35,6 +35,9 @@ pub struct AppState {
     pub codex: Mutex<usage::UsageSnapshot>,
     pub cursor: Mutex<usage::UsageSnapshot>,
     pub antigravity: Mutex<usage::UsageSnapshot>,
+    /// The second Antigravity ring — only ever non-absent on a machine with both "Antigravity" and
+    /// "Antigravity IDE" installed (see `antigravity::Install::Alternate`)
+    pub antigravity2: Mutex<usage::UsageSnapshot>,
     /// Provider glyph cache, collected at launch and again on a tray refresh
     pub glyphs: Mutex<std::collections::HashMap<String, glyphs::Glyph>>,
     /// Working state of the non-Claude providers (Cursor reports it; Codex and Antigravity are inferred from recent writes)
@@ -196,6 +199,42 @@ pub fn toggle_drag(app: &AppHandle) {
     let _ = app;
 }
 
+/// Collapses the pill to a small edge handle, or restores it — from the tray toggle, a drag
+/// gesture on the pill, or a click on the handle itself. The window itself stays shown and in
+/// place throughout; only the page's own CSS switches between the two, so nothing about window
+/// placement, click-through, or the tray/hooks/providers running underneath needs to change.
+pub fn set_notch_hidden(app: &AppHandle, hidden: bool) {
+    {
+        let st = app.state::<AppState>();
+        let mut c = st.cfg.lock().unwrap();
+        c.hidden = hidden;
+        config::save(&c);
+    }
+    let _ = app.emit("hidden", hidden);
+}
+
+#[tauri::command]
+fn set_hidden(app: AppHandle, hidden: bool) {
+    set_notch_hidden(&app, hidden);
+    if let Some(tray) = app.tray_by_id("main") {
+        let lang = {
+            let st = app.state::<AppState>();
+            let l = st.cfg.lock().unwrap().lang.clone();
+            l
+        };
+        if let Ok(menu) = tray::build_menu(&app, &lang) {
+            let _ = tray.set_menu(Some(menu)); // keeps the tray checkbox in sync with a drag/handle toggle
+        }
+    }
+}
+
+#[tauri::command]
+fn get_hidden(app: AppHandle) -> bool {
+    let st = app.state::<AppState>();
+    let h = st.cfg.lock().unwrap().hidden;
+    h
+}
+
 pub fn apply_lang(app: &AppHandle, lang: &str) {
     {
         let st = app.state::<AppState>();
@@ -268,6 +307,11 @@ fn get_antigravity(state: tauri::State<AppState>) -> usage::UsageSnapshot {
 }
 
 #[tauri::command]
+fn get_antigravity2(state: tauri::State<AppState>) -> usage::UsageSnapshot {
+    state.antigravity2.lock().unwrap().clone()
+}
+
+#[tauri::command]
 fn get_activity(state: tauri::State<AppState>) -> Vec<activity::Activity> {
     state.activity.lock().unwrap().clone()
 }
@@ -309,15 +353,125 @@ fn get_codex(state: tauri::State<AppState>) -> usage::UsageSnapshot {
     state.codex.lock().unwrap().clone()
 }
 
-/// A click on a cell opens that provider's usage page
+
+/// Both Claude Desktop and the ChatGPT desktop app ship as MSIX packages (Windows Store-style), not
+/// plain .exe files under Program Files — their real binaries live under the ACL-locked
+/// `C:\Program Files\WindowsApps\...`, which a normal process cannot spawn directly (and shouldn't
+/// try to: MSIX apps are meant to be launched by their Application User Model ID, not their file
+/// path). `Get-StartApps`, matched by the exact Start Menu display name, resolves the AUMID without
+/// hardcoding a publisher-specific package suffix that could change across app updates.
+#[cfg(windows)]
+fn find_aumid(display_name: &'static str) -> Option<String> {
+    fn run(display_name: &str) -> Option<String> {
+        let mut cmd = std::process::Command::new("powershell");
+        cmd.args([
+            "-NoProfile",
+            "-NonInteractive",
+            "-Command",
+            &format!(
+                "(Get-StartApps | Where-Object {{ $_.Name -eq '{}' }} | Select-Object -First 1 -ExpandProperty AppID)",
+                display_name.replace('\'', "''")
+            ),
+        ]);
+        cmd.stdin(std::process::Stdio::null()).stderr(std::process::Stdio::null());
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(0x0800_0000);
+        let out = cmd.output().ok()?;
+        let id = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        (!id.is_empty()).then_some(id)
+    }
+    static CACHE: Mutex<Option<std::collections::HashMap<&'static str, Option<String>>>> = Mutex::new(None);
+    let mut cache = CACHE.lock().unwrap();
+    cache.get_or_insert_with(Default::default).entry(display_name).or_insert_with(|| run(display_name)).clone()
+}
+#[cfg(not(windows))]
+fn find_aumid(_display_name: &'static str) -> Option<String> {
+    None
+}
+
+/// `explorer.exe shell:AppsFolder\<AUMID>` is the standard way to launch an MSIX/Store app from
+/// another process — the same mechanism the Start Menu itself uses, and the only one that works
+/// given WindowsApps' restricted ACLs.
+#[cfg(windows)]
+fn launch_aumid(aumid: &str) -> bool {
+    let mut cmd = std::process::Command::new("explorer.exe");
+    cmd.arg(format!(r"shell:AppsFolder\{aumid}"));
+    use std::os::windows::process::CommandExt;
+    cmd.creation_flags(0x0800_0000);
+    cmd.spawn().is_ok()
+}
+#[cfg(not(windows))]
+fn launch_aumid(_aumid: &str) -> bool {
+    false
+}
+
+fn launch(exe: &std::path::Path) -> bool {
+    let mut cmd = std::process::Command::new(exe);
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(0x0800_0000);
+    }
+    match cmd.spawn() {
+        Ok(_) => {
+            applog(&format!("launch: spawned {}", exe.display()));
+            true
+        }
+        Err(e) => {
+            applog(&format!("launch: failed to spawn {}: {e}", exe.display()));
+            false
+        }
+    }
+}
+
+/// A click on a cell raises that provider's own desktop app when one is installed, falling back to
+/// its usage website otherwise. `start`/`ShellExecute` on the URL was tried first and does not
+/// route to a desktop app on Windows the way it can on macOS — no app here registers itself as the
+/// domain's handler — so the app, when there is one, is found and launched directly instead. Claude
+/// Desktop and the ChatGPT desktop app are both MSIX packages, launched by AUMID; Antigravity is a
+/// plain install, launched by its exe path directly. "gemini2" is the second Antigravity ring (see
+/// `antigravity::Install`), pointed at whichever of the two installs the primary ring is not using.
 #[tauri::command]
 fn open_provider_page(provider: String) {
+    applog(&format!("open_provider_page: provider={provider:?}"));
+    let aumid_name: Option<&'static str> = match provider.as_str() {
+        "claude" => Some("Claude"),
+        "codex" => Some("ChatGPT"),
+        _ => None,
+    };
+    if let Some(name) = aumid_name {
+        if let Some(aumid) = find_aumid(name) {
+            applog(&format!("open_provider_page: {provider} aumid={aumid}"));
+            if launch_aumid(&aumid) {
+                return;
+            }
+        } else {
+            applog(&format!("open_provider_page: {provider} — no Start Menu entry named {name:?} found"));
+        }
+    }
+    let exe = match provider.as_str() {
+        "gemini" => antigravity::find_install(antigravity::Install::Primary),
+        "gemini2" => antigravity::find_install(antigravity::Install::Alternate),
+        _ => None,
+    };
+    applog(&format!("open_provider_page: resolved exe={exe:?}"));
+    if let Some(exe) = exe {
+        if launch(&exe) {
+            return;
+        }
+    }
     let url = match provider.as_str() {
         "codex" => "https://chatgpt.com/#settings/Account",
         "cursor" => "https://cursor.com/dashboard",
-        "gemini" => "https://antigravity.google",
+        "gemini" | "gemini2" => "https://antigravity.google",
         _ => "https://claude.ai/settings/usage",
     };
+    open_url(url);
+}
+
+/// The system default handler for the URL — whatever that is, including a desktop app registered
+/// for the domain.
+fn open_url(url: &str) {
     let mut cmd = std::process::Command::new("cmd");
     cmd.args(["/C", "start", "", url]);
     #[cfg(windows)]
@@ -457,14 +611,7 @@ fn log_js(msg: String) {
 
 #[tauri::command]
 fn open_usage_page() {
-    let mut cmd = std::process::Command::new("cmd");
-    cmd.args(["/C", "start", "", "https://claude.ai/settings/usage"]);
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
-    }
-    let _ = cmd.spawn();
+    open_url("https://claude.ai/settings/usage");
 }
 
 #[tauri::command]
@@ -600,6 +747,7 @@ fn main() {
             codex: Mutex::new(codex::load_persisted()),
             cursor: Mutex::new(cursor::load_persisted()),
             antigravity: Mutex::new(antigravity::load_persisted()),
+            antigravity2: Mutex::new(antigravity::load_persisted2()),
             glyphs: Mutex::new(Default::default()),
             activity: Mutex::new(Vec::new()),
         })
@@ -609,6 +757,7 @@ fn main() {
             get_codex,
             get_cursor,
             get_antigravity,
+            get_antigravity2,
             get_glyphs,
             get_activity,
             open_data_dir,
@@ -621,7 +770,9 @@ fn main() {
             log_js,
             focus_session,
             dismiss_session,
-            set_lang
+            set_lang,
+            set_hidden,
+            get_hidden
         ])
         .setup(move |app| {
             let handle = app.handle().clone();
@@ -637,6 +788,7 @@ fn main() {
             codex::start(handle.clone());
             cursor::start(handle.clone());
             antigravity::start(handle.clone());
+            antigravity::start2(handle.clone());
             activity::start(handle.clone());
             // Collecting glyphs may read icon resources out of a few executables; do it off the main thread and push when done
             let gh = handle.clone();

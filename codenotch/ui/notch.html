@@ -19,6 +19,18 @@
     box-shadow:none;
     display:flex;flex-direction:column;align-items:center;gap:14px;cursor:pointer;
   }
+  /* Collapsed: a small edge handle in place of the full pill — dragged into or clicked out of, like
+     a sidebar's collapse tab. The window itself never resizes; only which of these two is shown does.
+     A sibling of #pill rather than a child of it: renderRing() replaces #pill's entire innerHTML on
+     every update, which would otherwise wipe out a nested handle. */
+  #handle{
+    display:none;position:absolute;right:0;top:50%;transform:translateY(-50%);
+    width:16px;height:120px;background:#000;border-radius:12px 0 0 12px;
+    border:1px solid #2e2e2e;border-right:none;
+    align-items:center;justify-content:center;color:#8a8a8a;font-size:12px;cursor:pointer;
+  }
+  #root.collapsed #pill{display:none}
+  #root.collapsed #handle{display:flex}
   /* Fillets: the concave arcs between the pill's top/bottom and the screen edge (the inverse rounded
      corner in the upstream design frame). An R×R black square hugs the edge and a radial gradient
      punches out the circle of radius R centred on its outer corner; what remains is the arc. A 1 px
@@ -40,17 +52,17 @@
   .ringwrap > svg.ring{position:absolute;inset:0;overflow:visible} /* pins only the ring itself; an inline logo svg must not match this or it ends up in the top-left corner */
   .glyph{
     position:absolute;inset:0;display:flex;align-items:center;justify-content:center;
-    font-size:20px;font-weight:700;color:#e8e8ea;letter-spacing:-.5px;
+    font-size:16px;font-weight:700;color:#e8e8ea;letter-spacing:-.5px;
   }
-  .glyph.small{font-size:15px}
+  .glyph.small{font-size:12px}
   /* Glyphs: mark = the provider's own brand mark (monochrome, shown white); appicon = the installed app's icon (colour, rounded and shrunk) */
   .glyph img,.glyph svg{display:block;pointer-events:none;user-select:none}
-  .glyph .mark{display:block;width:26px;height:26px;color:#e8e8ea}
-  .glyph .mark svg{width:26px;height:26px;fill:currentColor} /* inline SVG follows currentColor, so it dims together with the cell */
-  .glyph img.png{width:26px;height:26px;object-fit:contain}
-  .glyph img.appicon{width:30px;height:30px;border-radius:8px;object-fit:cover}
-  .c-head .mark{display:inline-block;width:16px;height:16px;color:#e8e8ea;margin-right:2px}
-  .c-head .mark svg{width:16px;height:16px;fill:currentColor}
+  .glyph .mark{display:block;width:20px;height:20px;color:#e8e8ea}
+  .glyph .mark svg{width:20px;height:20px;fill:currentColor} /* inline SVG follows currentColor, so it dims together with the cell */
+  .glyph img.png{width:20px;height:20px;object-fit:contain}
+  .glyph img.appicon{width:22px;height:22px;border-radius:6px;object-fit:cover}
+  .c-head .mark{display:inline-block;width:14px;height:14px;color:#e8e8ea;margin-right:2px}
+  .c-head .mark svg{width:14px;height:14px;fill:currentColor}
   .pct{font-size:15px;font-weight:600;color:#fff;font-variant-numeric:tabular-nums}
   .dim{opacity:.55}
   /* Session arc animation */
@@ -102,6 +114,7 @@
 <div id="root">
   <div id="card"></div>
   <div id="pill"></div><!-- one .cell per provider, stacked vertically (upstream: data-driven, the same layout for 1–5 cells) -->
+  <div id="handle">‹</div><!-- shown instead of #pill when collapsed -->
   <div id="notice"></div>
 </div>
 <script>
@@ -117,6 +130,7 @@ let usage={status:'',windows:[],fetched_at:0,note:''};
 let codexSnap={status:'absent',windows:[],fetched_at:0,note:''};
 let cursorSnap={status:'absent',windows:[],fetched_at:0,note:''};
 let agSnap={status:'absent',windows:[],fetched_at:0,note:''};
+let agSnap2={status:'absent',windows:[],fetched_at:0,note:''}; // second ring: only non-absent when both "Antigravity" and "Antigravity IDE" are installed
 let glyphs={}; // id → {kind:'mark'|'appicon', url}
 let activity=[]; // working state of the non-Claude providers: {provider,state:'busy'|'waiting',name,detail,since}
 // "Is it working?" per provider: Claude from the four-state engine, the others from the activity probe. Returns running | attention | idle
@@ -134,9 +148,9 @@ function workState(id){
   return 'idle';
 }
 function glyphHtml(p,small){
-  const g=glyphs[p.id];
+  const g=glyphs[p.id==='gemini2'?'gemini':p.id]; // the second Antigravity ring shares the first's mark
   if(g&&g.kind==='svg'&&g.svg) return `<span class="mark">${g.svg}</span>`;
-  if(g&&g.url) return `<img class="${g.kind}" src="${g.url}" alt="${p.name}"${small?' style="width:16px;height:16px;border-radius:4px"':''}>`;
+  if(g&&g.url) return `<img class="${g.kind}" src="${g.url}" alt="${p.name}"${small?' style="width:14px;height:14px;border-radius:4px"':''}>`;
   return small?'':p.glyph; // fallback letter
 }
 // Provider table (order = top to bottom in the pill). `glyph` is the fallback letter used when no mark is available
@@ -145,6 +159,7 @@ function providers(){
   if(codexSnap.status!=='absent') list.push({id:'codex',name:'Codex',glyph:'Cx',snap:codexSnap});
   if(cursorSnap.status!=='absent') list.push({id:'cursor',name:'Cursor',glyph:'Cu',snap:cursorSnap});
   if(agSnap.status!=='absent') list.push({id:'gemini',name:'Antigravity',glyph:'Ag',snap:agSnap});
+  if(agSnap2.status!=='absent') list.push({id:'gemini2',name:'Antigravity IDE',glyph:'Ag',snap:agSnap2});
   return list;
 }
 function headlineOf(snap){
@@ -204,15 +219,17 @@ function renderRing(){
   }
 }
 
+// Time remaining, not a reset date — "Resets in 3 Days 3h" / "3h 20m" / "51 min" (upstream wording)
 function resetCopy(ms){
   if(!ms) return '';
   const diff=ms-Date.now();
   if(diff<=0) return 'Resetting…';
-  if(diff<60*60*1000) return `Resets in ${Math.max(1,Math.round(diff/60000))} min`;
-  const d=new Date(ms);
-  const t=d.toLocaleTimeString('en-US',{hour:'numeric',minute:'2-digit'});
-  if(diff<24*60*60*1000) return `Resets at ${t}`;
-  return `Resets ${d.toLocaleDateString('en-US',{weekday:'short'})} ${t}`;
+  const minutes=Math.max(1,Math.round(diff/60000));
+  const hours=Math.floor(minutes/60);
+  const days=Math.floor(hours/24);
+  if(days>0) return `Resets in ${days} ${days===1?'Day':'Days'} ${hours%24}h`;
+  if(hours>0) return `Resets in ${hours}h ${minutes%60}m`;
+  return `Resets in ${minutes} min`;
 }
 
 function ago(ms){
@@ -231,7 +248,7 @@ function renderCard(){
   let html=`<div class="c-head">${headIcon}<span class="c-title">${p.name} Usage</span></div>`;
   if(staleOf(snap)&&snap.fetched_at) html+=`<div class="c-sub">Updated ${ago(snap.fetched_at)}</div>`;
   if(snap.status==='needsAuth'){
-    const who={claude:'Sign in to Claude Code to see usage.',cursor:'Sign in to Cursor to see usage.',codex:'Sign in to Codex to see usage.',gemini:'Sign in to Antigravity to see usage.'}[p.id]||'';
+    const who={claude:'Sign in to Claude Code to see usage.',cursor:'Sign in to Cursor to see usage.',codex:'Sign in to Codex to see usage.',gemini:'Sign in to Antigravity to see usage.',gemini2:'Sign in to Antigravity to see usage.'}[p.id]||'';
     html+=`<div class="c-note">${who}<br>${snap.note||''}</div>`;
   }else if(!snap.windows.length){
     html+=`<div class="c-note">${snap.note||'Waiting for first reading…'}</div>`;
@@ -288,7 +305,20 @@ function esc(s){const d=document.createElement('div');d.textContent=s||'';return
 
 /* Hover: stays expanded while either the pill or the card is under the cursor; collapses after a 250 ms grace period (upstream motion rule) */
 const card=document.getElementById('card'), pill=document.getElementById('pill');
+const root=document.getElementById('root'), handle=document.getElementById('handle');
 let hideTimer=null;
+
+// Collapsed = a small edge handle instead of the full pill, toggled by the tray checkbox, a
+// sideways drag on the pill, or a click on the handle — like a sidebar's collapse tab. Persisted
+// on the Rust side, so it survives a restart; this page just mirrors whatever it is told.
+let collapsed=false;
+function applyCollapsed(){
+  root.classList.toggle('collapsed',collapsed);
+  if(collapsed){ clearTimeout(hideTimer); hideCard(); }
+}
+invoke('get_hidden').then(h=>{collapsed=!!h;applyCollapsed();}).catch(()=>{});
+listen('hidden',e=>{collapsed=!!e.payload;applyCollapsed();}).catch(()=>{});
+handle.addEventListener('click',()=>{invoke('set_hidden',{hidden:false}).catch(()=>{});});
 function showCard(){clearTimeout(hideTimer);card.classList.add('show');renderCard();armWatchdog();} // show first, then render: placeCard needs offsetHeight
 function hideCard(){card.classList.remove('show');invoke('set_expanded',{on:false,rects:null}).catch(()=>{});}
 function scheduleHide(){clearTimeout(hideTimer);hideTimer=setTimeout(hideCard,250);}
@@ -340,7 +370,7 @@ function pointerInHot(x,y){
 }
 let hideLogged=0;
 document.addEventListener('mousemove',e=>{
-  if(dragging)return; // no card while dragging
+  if(dragging||collapsed)return; // no card while dragging, and nothing to hover when collapsed
   const hot=pointerInHot(e.clientX,e.clientY);
   if(hot){
     clearTimeout(hideTimer);
@@ -357,23 +387,40 @@ listen('pointer_left',()=>{clearTimeout(hideTimer);hideCard();}).catch(()=>{});
 // Card content changes change its height -> report the hot rectangles again
 listen('usage',()=>{if(card.classList.contains('show'))armWatchdog();}).catch(()=>{});
 listen('state',()=>{if(card.classList.contains('show'))armWatchdog();}).catch(()=>{});
-/* The pill can be dragged up and down the right edge. Press and move more than 4 px = drag (handed to Rust,
-   which follows the system cursor; the card is collapsed first); release without moving = click (opens the provider's usage page). */
-let press=null, dragging=false;
-pill.addEventListener('mousedown',e=>{ if(e.button!==0)return; press={x:e.clientX,y:e.clientY,id:cellAt(e.clientX,e.clientY)||hoverId}; });
+/* The pill can be dragged up and down the right edge (handed to Rust, which follows the system
+   cursor) or dragged sideways, away from the edge, to collapse it (handled entirely on this side —
+   the window never moves, only #pill's own translateX gives the pull-away feedback). Whichever axis
+   the pointer moves further along in the first 4 px decides which gesture it is. Release without
+   moving = click (opens the provider's usage page); a click on the handle itself restores instead. */
+const HIDE_DRAG_PX=40; // how far sideways commits to collapsing, vs snapping back
+let press=null, dragging=false, dragAxis=null;
+pill.addEventListener('mousedown',e=>{ if(e.button!==0||collapsed)return; press={x:e.clientX,y:e.clientY,id:cellAt(e.clientX,e.clientY)||hoverId}; });
 document.addEventListener('mousemove',e=>{
-  if(!press||dragging)return;
-  if(Math.abs(e.clientY-press.y)>4||Math.abs(e.clientX-press.x)>4){
+  if(!press)return;
+  const dx=e.clientX-press.x, dy=e.clientY-press.y;
+  if(!dragging){
+    if(Math.abs(dx)<4&&Math.abs(dy)<4)return;
     dragging=true; clearTimeout(hideTimer); hideCard();
-    invoke('drag_begin').catch(err=>{notice('drag_begin failed: '+err);dragging=false;});
+    dragAxis=(dx>0&&Math.abs(dx)>Math.abs(dy))?'hide':'move';
+    if(dragAxis==='move') invoke('drag_begin').catch(err=>{notice('drag_begin failed: '+err);dragging=false;});
+  }
+  if(dragAxis==='hide'){
+    const pull=Math.max(0,Math.min(dx,HIDE_DRAG_PX*1.5));
+    pill.style.transform=`translateY(-50%) translateX(${pull}px)`;
+    pill.style.opacity=String(1-pull/(HIDE_DRAG_PX*1.5)*0.7);
   }
 });
 document.addEventListener('mouseup',e=>{
   if(e.button!==0)return;
-  if(press&&!dragging) invoke('open_provider_page',{provider:press.id}).catch(()=>{});
-  press=null;
+  if(dragAxis==='hide'){
+    pill.style.transform='';pill.style.opacity='';
+    if(e.clientX-press.x>HIDE_DRAG_PX) invoke('set_hidden',{hidden:true}).catch(()=>{});
+  } else if(press&&!dragging){
+    invoke('open_provider_page',{provider:press.id}).catch(()=>{});
+  }
+  press=null;dragging=false;dragAxis=null;
 });
-listen('drag_end',()=>{dragging=false;press=null;}).catch(()=>{});
+listen('drag_end',()=>{dragging=false;press=null;dragAxis=null;}).catch(()=>{});
 
 function notice(msg){
   const n=document.getElementById('notice');
@@ -391,6 +438,8 @@ listen('cursor',e=>{cursorSnap=e.payload||cursorSnap;renderRing();if(card.classL
 invoke('get_cursor').then(u=>{cursorSnap=u||cursorSnap;renderRing();}).catch(()=>{});
 listen('antigravity',e=>{agSnap=e.payload||agSnap;renderRing();if(card.classList.contains('show'))renderCard();}).catch(()=>{});
 invoke('get_antigravity').then(u=>{agSnap=u||agSnap;renderRing();}).catch(()=>{});
+listen('antigravity2',e=>{agSnap2=e.payload||agSnap2;renderRing();if(card.classList.contains('show'))renderCard();}).catch(()=>{});
+invoke('get_antigravity2').then(u=>{agSnap2=u||agSnap2;renderRing();}).catch(()=>{});
 listen('glyphs',e=>{glyphs=e.payload||glyphs;renderRing();if(card.classList.contains('show'))renderCard();}).catch(()=>{});
 listen('activity',e=>{activity=e.payload||activity;renderRing();if(card.classList.contains('show'))renderCard();}).catch(()=>{});
 invoke('get_activity').then(a=>{activity=a||activity;renderRing();}).catch(()=>{});
