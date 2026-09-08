@@ -18,6 +18,9 @@ Run-Checked $installer.FullName "/S /D=$installDir"
 $app = Join-Path $installDir 'codenotch.exe'
 $helper = Join-Path $installDir 'codenotch-hook.exe'
 if (!(Test-Path $app) -or !(Test-Path $helper)) { throw 'Installed binaries missing.' }
+foreach ($notice in @('LICENSE.txt', 'licenses/provider-marks.md')) {
+    if (!(Test-Path (Join-Path $installDir $notice))) { throw "Missing bundled notice: $notice" }
+}
 New-Item -ItemType Directory -Force (Split-Path $settings) | Out-Null
 '{"hooks":{"Stop":[{"hooks":[{"type":"command","command":"echo keep"}]}]},"keep":true}' | Set-Content $settings
 Run-Checked $app 'install-hooks'

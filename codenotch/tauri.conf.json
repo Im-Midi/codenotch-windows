@@ -32,7 +32,11 @@
     "active": true,
     "targets": ["nsis"],
     "icon": ["icons/icon.ico"],
-    "resources": { "../target/release/codenotch-hook.exe": "codenotch-hook.exe" },
+    "resources": {
+      "../target/release/codenotch-hook.exe": "codenotch-hook.exe",
+      "../LICENSE": "LICENSE.txt",
+      "glyphs/NOTICE.md": "licenses/provider-marks.md"
+    },
     "windows": {
       "webviewInstallMode": { "type": "downloadBootstrapper" },
       "nsis": {
