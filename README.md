@@ -26,10 +26,17 @@ Prerequisites: Rust (MSVC toolchain), WebView2 runtime (ships with Windows 11).
 
 ```powershell
 # from this directory (the repo root here; `windows/` inside the upstream repo)
+# Build the Claude Code hook sidecar first; the Tauri app bundles it beside codenotch.exe.
+cargo build -p codenotch-hook --release
+New-Item -ItemType Directory -Force codenotch\bin | Out-Null
+Copy-Item target\release\codenotch-hook.exe codenotch\bin\
 cargo build --release
 .\target\release\codenotch.exe          # pill appears on the right edge of the primary monitor
 .\target\release\codenotch.exe doctor   # self-diagnosis: credentials, data sources, icons, hooks
 ```
+
+To create the NSIS installer, run `cargo tauri build` after the sidecar copy above. The installer is
+per-user and places both executables in the same directory so Claude Code hooks can find the app.
 
 Tray menu: refresh now, reset position, open data folder (`%APPDATA%\codenotch` — logs,
 persisted readings, icon overrides), start with Windows, install/uninstall Claude Code hooks.
