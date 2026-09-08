@@ -20,7 +20,33 @@ documented behaviour and the wire formats.
 
 Providers that are not installed simply do not get a cell.
 
-## Install / build
+## Install on Windows
+
+Installer support targets **Windows 11 x64**. The first installer release must be
+published by the maintainer; until then, use the developer build instructions below.
+Published installers will appear on the repository's **Releases** page.
+
+1. Download the release asset ending in `x64-setup.exe` and run it.
+2. Follow setup, then launch **Codenotch** from the Start menu.
+3. Optionally enable **Start with Windows** or **Install Claude Code hooks** in the tray menu.
+
+The installer includes the hook helper. No Rust or developer tools are needed.
+If WebView2 is missing, setup downloads it; keep an internet connection available.
+If that download fails, reconnect and retry setup. Builds are currently unsigned,
+so Windows may show an unknown-publisher warning. Obtain installers from this
+repository's releases and compare the download against the supplied `SHA256SUMS.txt`.
+
+Installing over the same location preserves settings. For unattended updates, use
+`setup.exe /S /UPDATE`; this also preserves startup and hook registration.
+Choosing to uninstall the old version first removes those optional registrations;
+enable them again from the tray after reinstalling.
+
+Remove Codenotch from Windows **Settings > Apps > Installed apps**. Uninstall removes
+startup registration and hooks pointing to this installation, while retaining
+other Claude hooks and Codenotch settings. If Claude settings cannot be read or
+backed up safely, uninstall stops so you can correct the problem and retry.
+
+## Build for development
 
 Prerequisites: Rust (MSVC toolchain), WebView2 runtime (ships with Windows 11).
 
@@ -33,6 +59,19 @@ cargo build --release
 
 Tray menu: refresh now, reset position, open data folder (`%APPDATA%\codenotch` — logs,
 persisted readings, icon overrides), start with Windows, install/uninstall Claude Code hooks.
+
+### Build an installer
+
+On a Windows x64 development machine with the prerequisites above and Node.js 22:
+
+```powershell
+npm install --global @tauri-apps/cli@2.11.4
+./scripts/build-installer.ps1
+```
+
+This builds the helper first and puts the installer in `target/release/bundle/nsis/`.
+Use the default target directory; the bundle resource path points to
+`target/release/codenotch-hook.exe`. See [release and validation notes](docs/releases.md).
 
 ### Icons
 

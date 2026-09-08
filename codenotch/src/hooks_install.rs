@@ -49,7 +49,8 @@ fn backup_and_write(path: &PathBuf, root: &Value) -> Result<(), String> {
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_secs())
             .unwrap_or(0);
-        let _ = std::fs::copy(path, path.with_extension(format!("json.codenotch-bak-{ts}")));
+        std::fs::copy(path, path.with_extension(format!("json.codenotch-bak-{ts}")))
+            .map_err(|e| e.to_string())?;
     }
     let txt = serde_json::to_string_pretty(root).map_err(|e| e.to_string())?;
     std::fs::write(path, txt).map_err(|e| e.to_string())
@@ -119,4 +120,75 @@ pub fn uninstall() -> Result<String, String> {
     }
     backup_and_write(&path, &root)?;
     Ok(format!("removed {removed} Codenotch hook(s)"))
+}
+
+/// The installer must not remove hooks owned by another checkout or mixed into the same group.
+pub fn uninstall_current_installation() -> Result<String, String> {
+    let path = settings_path().ok_or("cannot find the user directory")?;
+    let executable = std::env::current_exe().map_err(|e| e.to_string())?;
+    let helper = executable.with_file_name("codenotch-hook.exe");
+    uninstall_from(&path, &helper)
+}
+
+fn uninstall_from(path: &PathBuf, helper: &std::path::Path) -> Result<String, String> {
+    let text = match std::fs::read_to_string(path) {
+        Ok(text) => text,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok("no settings to clean".into()),
+        Err(e) => return Err(e.to_string()),
+    };
+    let mut root: Value = serde_json::from_str(&text).map_err(|e| e.to_string())?;
+    let removed = remove_installed_hooks(&mut root, helper);
+    if removed > 0 {
+        backup_and_write(path, &root)?;
+    }
+    Ok(format!("removed {removed} installed Codenotch hook(s)"))
+}
+
+fn remove_installed_hooks(root: &mut Value, helper: &std::path::Path) -> usize {
+    let prefix = format!("\"{}\" ", helper.display());
+    let Some(events) = root.get_mut("hooks").and_then(Value::as_object_mut) else { return 0 };
+    let mut removed = 0;
+    for groups in events.values_mut().filter_map(Value::as_array_mut) {
+        groups.retain_mut(|group| {
+            let Some(commands) = group.get_mut("hooks").and_then(Value::as_array_mut) else { return true };
+            let before = commands.len();
+            commands.retain(|hook| {
+                !hook["command"].as_str().map(|command| {
+                    command.strip_prefix(&prefix)
+                        .map(|event| WIRING.iter().any(|(_, _, internal)| event == *internal))
+                        .unwrap_or(false)
+                }).unwrap_or(false)
+            });
+            removed += before - commands.len();
+            before == commands.len() || !commands.is_empty()
+        });
+    }
+    removed
+}
+
+#[cfg(test)]
+mod installer_tests {
+    use super::*;
+
+    #[test]
+    fn uninstall_preserves_other_commands_and_installations() {
+        let helper = std::path::Path::new(r"C:\Users\Zoë Test\Codenotch\codenotch-hook.exe");
+        let mut root = json!({"other": true, "hooks": {"Stop": [
+            {"matcher": "*", "hooks": [
+                {"command": format!("\"{}\" done", helper.display())},
+                {"command": "echo keep me"},
+                {"command": "\"C:\\Other\\codenotch-hook.exe\" done"}
+            ]},
+            {"hooks": [{"command": format!("\"{}\" done", helper.display())}]},
+            {"hooks": []}
+        ]}});
+        assert_eq!(remove_installed_hooks(&mut root, helper), 2);
+        assert_eq!(root, json!({"other": true, "hooks": {"Stop": [
+            {"matcher": "*", "hooks": [
+                {"command": "echo keep me"},
+                {"command": "\"C:\\Other\\codenotch-hook.exe\" done"}
+            ]}, {"hooks": []}
+        ]}}));
+        assert_eq!(remove_installed_hooks(&mut root, helper), 0);
+    }
 }
