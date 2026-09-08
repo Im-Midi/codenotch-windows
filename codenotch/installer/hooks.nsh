@@ -8,7 +8,7 @@
       StrCpy $0 1
     ${EndIf}
     ${If} $0 <> 0
-      MessageBox MB_OK|MB_ICONSTOP "Could not remove Codenotch hooks. Your Claude settings were not replaced. Check install.log in the Codenotch data folder, then retry uninstalling." /SD IDOK
+      MessageBox MB_OK|MB_ICONSTOP "Could not safely remove Codenotch hooks. Check your Claude settings and any .codenotch-bak backup, then retry uninstalling." /SD IDOK
       SetErrorLevel 1
       Abort
     ${EndIf}

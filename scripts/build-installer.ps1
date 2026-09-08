@@ -6,7 +6,8 @@ try {
     if ($LASTEXITCODE -ne 0) { throw 'Hook build failed.' }
     Push-Location codenotch
     try {
-        tauri build --ci --bundles nsis -- --locked
+        # Invoke the native shim: PowerShell's npm shim consumes the -- separator.
+        tauri.cmd build --ci --bundles nsis -- --locked
         if ($LASTEXITCODE -ne 0) { throw 'Installer build failed.' }
     } finally { Pop-Location }
 } finally { Pop-Location }

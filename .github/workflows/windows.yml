@@ -13,6 +13,7 @@ permissions:
 jobs:
   build:
     runs-on: windows-2022
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -42,6 +43,7 @@ jobs:
         shell: pwsh
         run: cargo test --locked --workspace
       - name: Smoke test installed lifecycle
+        timeout-minutes: 5
         shell: pwsh
         run: ./scripts/test-installer.ps1
       - name: Create checksum
