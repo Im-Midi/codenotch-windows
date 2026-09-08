@@ -555,6 +555,12 @@ fn main() {
     let args: Vec<String> = std::env::args().collect();
     if let Some(cmd) = args.get(1) {
         match cmd.as_str() {
+            "uninstall-installed-hooks" => {
+                let result = hooks_install::uninstall_current_installation();
+                let code = if result.is_ok() { 0 } else { 1 };
+                report(result);
+                std::process::exit(code);
+            }
             "install-hooks" => {
                 report(hooks_install::install());
                 return;

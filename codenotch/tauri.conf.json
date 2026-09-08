@@ -31,6 +31,14 @@
   "bundle": {
     "active": true,
     "targets": ["nsis"],
-    "icon": ["icons/icon.ico"]
+    "icon": ["icons/icon.ico"],
+    "resources": { "../target/release/codenotch-hook.exe": "codenotch-hook.exe" },
+    "windows": {
+      "webviewInstallMode": { "type": "downloadBootstrapper" },
+      "nsis": {
+        "installMode": "currentUser",
+        "installerHooks": "installer/hooks.nsh"
+      }
+    }
   }
 }
