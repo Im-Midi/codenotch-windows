@@ -40,6 +40,7 @@ pub struct Activity {
     pub detail: String,
     /// ms epoch
     pub since: u64,
+    pub inferred: bool,
 }
 
 fn now_ms() -> u64 {
@@ -69,11 +70,12 @@ struct DbCache {
     sig: (u64, u64),
     last: Vec<Activity>,
     checked_once: bool,
+    checked_at: u64,
 }
 
 impl DbCache {
     fn new(path: std::path::PathBuf) -> Self {
-        Self { path, conn: None, sig: (0, 0), last: Vec::new(), checked_once: false }
+        Self { path, conn: None, sig: (0, 0), last: Vec::new(), checked_once: false, checked_at: 0 }
     }
     fn signature(&self) -> (u64, u64) {
         let wal = {
@@ -86,10 +88,11 @@ impl DbCache {
     /// Calls f only when something changed (or on the first run); f returning None means the query failed → drop the connection and reopen next time
     fn refresh<F: FnOnce(&rusqlite::Connection) -> Option<Vec<Activity>>>(&mut self, f: F) -> Vec<Activity> {
         let sig = self.signature();
-        if self.checked_once && sig == self.sig {
+        if self.checked_once && sig == self.sig && now_ms().saturating_sub(self.checked_at) < 30_000 {
             return self.last.clone();
         }
         self.sig = sig;
+        self.checked_at=now_ms();
         self.checked_once = true;
         if self.conn.is_none() {
             self.conn = open_ro(&self.path);
@@ -118,19 +121,21 @@ struct Ctx {
     rollout_checked_at: u64,
     rollout_sig: u64,
     rollout_last: Vec<Activity>,
+    rollout_valid_until: u64,
 }
 
 impl Ctx {
     fn new() -> Self {
-        let home = dirs::home_dir().unwrap_or_default();
+        let home = crate::codex::codex_home().unwrap_or_default();
         Self {
             cursor: DbCache::new(crate::cursor::store_url().unwrap_or_default()),
-            codex_turns: DbCache::new(home.join(".codex").join("thread_history_1.sqlite")),
+            codex_turns: DbCache::new(home.join("thread_history_1.sqlite")),
             codex_names: None,
             rollout_path: None,
             rollout_checked_at: 0,
             rollout_sig: 0,
             rollout_last: Vec::new(),
+            rollout_valid_until: 0,
         }
     }
 }
@@ -180,6 +185,7 @@ fn cursor_activity(ctx: &mut Ctx) -> Vec<Activity> {
                     v.get("subtitle").and_then(|x| x.as_str()).unwrap_or("Working").to_string()
                 },
                 since,
+                inferred: false,
             });
         }
         out.sort_by(|a, b| b.since.cmp(&a.since));
@@ -204,6 +210,8 @@ enum CodexStep {
     Thinking,
     AsstMsg,
     Aborted,
+    Done,
+    Waiting,
 }
 
 fn codex_last_step(text: &str) -> Option<(CodexStep, u64)> {
@@ -224,6 +232,7 @@ fn codex_last_step(text: &str) -> Option<(CodexStep, u64)> {
                 "function_call" | "local_shell_call" | "custom_tool_call" | "web_search_call" => Some(CodexStep::Tool),
                 "function_call_output" | "custom_tool_call_output" | "reasoning" => Some(CodexStep::Thinking),
                 "message" => match p.get("role").and_then(|x| x.as_str()).unwrap_or("") {
+                    "assistant" if p.get("channel").and_then(|x|x.as_str())==Some("final") => Some(CodexStep::Done),
                     "assistant" => Some(CodexStep::AsstMsg),
                     "user" => Some(CodexStep::Thinking),
                     _ => None, // system/developer messages say nothing about state
@@ -231,7 +240,9 @@ fn codex_last_step(text: &str) -> Option<(CodexStep, u64)> {
                 _ => None,
             },
             "event_msg" => match pt {
-                "turn_aborted" | "task_complete" => Some(CodexStep::Aborted), // newer builds do write task_complete: an explicit end
+                "turn_aborted" => Some(CodexStep::Aborted),
+                "task_complete" => Some(CodexStep::Done),
+                "request_user_input" | "approval_requested" => Some(CodexStep::Waiting), // newer builds do write task_complete: an explicit end
                 "task_started" | "item_started" | "exec_command_begin" => Some(CodexStep::Thinking),
                 "user_message" => Some(CodexStep::Thinking),
                 "agent_message" => Some(CodexStep::AsstMsg),
@@ -255,10 +266,10 @@ fn codex_last_step(text: &str) -> Option<(CodexStep, u64)> {
 fn codex_turns_in_progress(ctx: &mut Ctx) -> Vec<Activity> {
     let now = now_ms();
     if ctx.codex_names.is_none() {
-        ctx.codex_names = dirs::home_dir().and_then(|h| open_ro(&h.join(".codex").join("state_5.sqlite")));
+        ctx.codex_names = crate::codex::codex_home().and_then(|h| open_ro(&h.join("state_5.sqlite")));
     }
     let names = ctx.codex_names.as_ref();
-    ctx.codex_turns.refresh(|conn| {
+    let rows = ctx.codex_turns.refresh(|conn| {
         let mut stmt = conn
             .prepare("SELECT thread_id, started_at FROM thread_turns WHERE status = 'inProgress' ORDER BY started_at DESC LIMIT 8")
             .ok()?;
@@ -311,11 +322,13 @@ fn codex_turns_in_progress(ctx: &mut Ctx) -> Vec<Activity> {
                 state: if waiting { "waiting" } else { "busy" }.into(),
                 name,
                 detail: if waiting { "needs your input".into() } else { "Working".into() },
-                since: started_ms,
+                since: last,
+                inferred: waiting,
             });
         }
         Some(out)
-    })
+    });
+    rows.into_iter().filter(|a|now.saturating_sub(a.since)<=10*60_000).collect()
 }
 
 fn codex_activity(ctx: &mut Ctx) -> Vec<Activity> {
@@ -337,7 +350,7 @@ fn codex_activity(ctx: &mut Ctx) -> Vec<Activity> {
         return ctx
             .rollout_last
             .iter()
-            .filter(|a| now.saturating_sub(a.since) <= 10 * 60_000)
+            .filter(|_| now <= ctx.rollout_valid_until)
             .cloned()
             .collect();
     }
@@ -345,16 +358,18 @@ fn codex_activity(ctx: &mut Ctx) -> Vec<Activity> {
     ctx.rollout_last.clear();
     if let Some(text) = crate::codex::tail_text(&p) {
         if let Some((step, ts)) = codex_last_step(&text) {
-            let at = ts.max(mtime);
+            let at = if ts>0 {ts} else {mtime};
             let quiet = now.saturating_sub(at);
-            let busy = match step {
-                CodexStep::Tool => quiet <= 10 * 60_000,
-                CodexStep::Thinking => quiet <= 120_000,
-                CodexStep::AsstMsg => quiet <= 4_000,
-                CodexStep::Aborted => false,
-            };
-            if busy {
-                ctx.rollout_last = vec![Activity { provider: "codex".into(), state: "busy".into(), name: "Codex".into(), detail: "Working".into(), since: at }];
+            let ttl = match step { CodexStep::Tool | CodexStep::Waiting => 600_000, CodexStep::Thinking => 120_000, CodexStep::AsstMsg => 4_000, CodexStep::Done | CodexStep::Aborted => 60_000 };
+            ctx.rollout_valid_until=at.saturating_add(ttl);
+            if quiet <= ttl {
+                let (state,detail,inferred)=match step {
+                    CodexStep::Done => ("done","Completed",false), CodexStep::Aborted => ("aborted","Aborted",false),
+                    CodexStep::Waiting => ("waiting","Waiting for input",false),
+                    CodexStep::Tool => ("unknown","Tool running or waiting for input",true),
+                    _ => ("busy","Working",true),
+                };
+                ctx.rollout_last=vec![Activity {provider:"codex".into(),state:state.into(),name:"Codex".into(),detail:detail.into(),since:at,inferred}];
             }
         }
     }
@@ -488,7 +503,7 @@ fn claude_activity() -> Vec<Activity> {
     }
     let last = CLAUDE_LAST_ACTIVE.load(std::sync::atomic::Ordering::Relaxed);
     if last > 0 && now.saturating_sub(last) <= CLAUDE_HOLD_MS {
-        vec![Activity { provider: "claude".into(), state: "busy".into(), name: "Claude".into(), detail: "Streaming (network)".into(), since: last }]
+        vec![Activity { provider: "claude".into(), state: "busy".into(), name: "Claude".into(), detail: "Streaming (network)".into(), inferred: true, since: last }]
     } else {
         vec![]
     }
@@ -511,7 +526,7 @@ fn antigravity_activity() -> Vec<Activity> {
     if now_ms().saturating_sub(at) > ANTIGRAVITY_STALE_MS {
         return vec![];
     }
-    vec![Activity { provider: "gemini".into(), state: "busy".into(), name: "Antigravity".into(), detail: "Working".into(), since: at }]
+    vec![Activity { provider: "gemini".into(), state: "busy".into(), name: "Antigravity".into(), detail: "Working".into(), inferred: true, since: at }]
 }
 
 // ---------------- Putting it together ----------------
@@ -527,16 +542,16 @@ fn presence() -> Presence {
     Presence { cursor: crate::cursor::present(), codex: crate::codex::present(), gemini: crate::antigravity::present() }
 }
 
-fn read_all(p: Presence, ctx: &mut Ctx) -> Vec<Activity> {
+fn read_all(app: &AppHandle, p: Presence, ctx: &mut Ctx) -> Vec<Activity> {
     let mut all = Vec::new();
-    all.extend(claude_activity());
-    if p.cursor {
+    if crate::settings::enabled(app,"claude") { all.extend(claude_activity()); }
+    if p.cursor && crate::settings::enabled(app,"cursor") {
         all.extend(cursor_activity(ctx));
     }
-    if p.codex {
+    if p.codex && crate::settings::enabled(app,"codex") {
         all.extend(codex_activity(ctx));
     }
-    if p.gemini {
+    if p.gemini && crate::settings::enabled(app,"gemini") {
         all.extend(antigravity_activity());
     }
     all
@@ -600,7 +615,7 @@ pub fn start(app: AppHandle) {
                 pres = presence();
             }
             tick = tick.wrapping_add(1);
-            let found = read_all(pres, &mut ctx);
+            let found = read_all(&app, pres, &mut ctx);
             if found != last {
                 // Log the first 20 state changes (with the Codex raw material) so thresholds can be calibrated
                 static LOGGED: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
@@ -617,4 +632,21 @@ pub fn start(app: AppHandle) {
             std::thread::sleep(INTERVAL);
         }
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn explicit_session_events_and_tool_ambiguity_are_preserved() {
+        for (kind,expected) in [("task_started",CodexStep::Thinking),("task_complete",CodexStep::Done),("turn_aborted",CodexStep::Aborted),("approval_requested",CodexStep::Waiting)] {
+            let text=serde_json::json!({"type":"event_msg","timestamp":"2026-09-09T12:00:00Z","payload":{"type":kind}}).to_string();
+            assert_eq!(codex_last_step(&text).unwrap().0,expected);
+        }
+        let text=r#"{"type":"response_item","payload":{"type":"message","role":"assistant","channel":"final"}}"#;
+        assert_eq!(codex_last_step(text).unwrap().0,CodexStep::Done);
+        let tool=r#"{"type":"response_item","payload":{"type":"function_call"}}"#;
+        assert_eq!(codex_last_step(tool).unwrap().0,CodexStep::Tool);
+        assert!(codex_last_step(r#"{"type":"event_msg","payload":{"type":"token_count"}}"#).is_none());
+    }
 }

@@ -26,18 +26,19 @@ fn is_ours(entry: &Value) -> bool {
             hs.iter().any(|h| {
                 h["command"]
                     .as_str()
-                    .map(|c| c.contains("codenotch-hook") || c.contains("eatbean-hook") || c.contains("pacman-hook"))
+                    .map(|c| c.contains("codenotch-hook"))
                     .unwrap_or(false)
             })
         })
         .unwrap_or(false)
 }
 
-fn load(path: &PathBuf) -> Value {
-    std::fs::read_to_string(path)
-        .ok()
-        .and_then(|t| serde_json::from_str(&t).ok())
-        .unwrap_or_else(|| json!({}))
+fn load(path: &PathBuf) -> Result<Value,String> {
+    if !path.exists() { return Ok(json!({})); }
+    let text=std::fs::read_to_string(path).map_err(|e|e.to_string())?;
+    let value:Value=serde_json::from_str(&text).map_err(|_|"Claude settings contain invalid JSON; no changes made.".to_string())?;
+    if !value.is_object() { return Err("Claude settings must be a JSON object; no changes made.".into()); }
+    Ok(value)
 }
 
 fn backup_and_write(path: &PathBuf, root: &Value) -> Result<(), String> {
@@ -49,10 +50,10 @@ fn backup_and_write(path: &PathBuf, root: &Value) -> Result<(), String> {
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_secs())
             .unwrap_or(0);
-        let _ = std::fs::copy(path, path.with_extension(format!("json.codenotch-bak-{ts}")));
+        std::fs::copy(path, path.with_extension(format!("json.codenotch-bak-{ts}"))).map_err(|e|e.to_string())?;
     }
     let txt = serde_json::to_string_pretty(root).map_err(|e| e.to_string())?;
-    std::fs::write(path, txt).map_err(|e| e.to_string())
+    crate::config::atomic_write(path,txt.as_bytes()).map_err(|e|e.to_string())
 }
 
 pub fn is_installed() -> bool {
@@ -73,7 +74,7 @@ pub fn install() -> Result<String, String> {
         return Err(format!("missing {}", hook_exe.display()));
     }
 
-    let mut root = load(&path);
+    let mut root = load(&path)?;
     if !root.is_object() {
         root = json!({});
     }
@@ -105,7 +106,7 @@ pub fn uninstall() -> Result<String, String> {
     if !path.exists() {
         return Ok("settings.json does not exist, nothing to uninstall".into());
     }
-    let mut root = load(&path);
+    let mut root = load(&path)?;
     let Some(hooks) = root["hooks"].as_object_mut() else {
         return Ok("no hooks configuration found".into());
     };

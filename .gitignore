@@ -1,13 +1,6 @@
 target/
 *.log
-check.txt
 codenotch/gen/
-
-# internal working notes (not part of the repository)
-开发文档.md
-美术文档.md
-避坑文档.md
-记忆文档.md
-upstream-proposal.md
-发布指引.md
-_to_delete/
+node_modules/
+output/
+published/

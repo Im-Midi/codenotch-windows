@@ -90,7 +90,7 @@ pub fn load_persisted() -> UsageSnapshot {
 
 fn persist(s: &UsageSnapshot) {
     if let Ok(t) = serde_json::to_string_pretty(s) {
-        let _ = std::fs::write(store_path(), t);
+        let _ = crate::config::atomic_write(&store_path(), t.as_bytes());
     }
 }
 
@@ -213,7 +213,7 @@ enum FetchErr {
 }
 
 fn fetch_once(token: &str) -> Result<Vec<LimitWindow>, FetchErr> {
-    let resp = ureq::get(ENDPOINT)
+    let resp = ureq::AgentBuilder::new().redirects(0).build().get(ENDPOINT)
         .set("Authorization", &format!("Bearer {token}"))
         .set("anthropic-beta", "oauth-2025-04-20")
         .timeout(Duration::from_secs(15))
@@ -229,10 +229,7 @@ fn fetch_once(token: &str) -> Result<Vec<LimitWindow>, FetchErr> {
             Err(FetchErr::NeedsAuth)
         }
         Err(ureq::Error::Status(429, r)) => {
-            let ra = r
-                .header("retry-after")
-                .and_then(|s| s.parse::<u64>().ok())
-                .unwrap_or(0);
+            let ra = retry_after(r.header("retry-after"), now_ms());
             Err(FetchErr::RateLimited(ra))
         }
         Err(ureq::Error::Status(code, _)) => Err(FetchErr::Other(format!("HTTP {code}"))),
@@ -243,6 +240,23 @@ fn fetch_once(token: &str) -> Result<Vec<LimitWindow>, FetchErr> {
 fn backoff_secs(consecutive: u32, retry_after_floor: u64) -> u64 {
     let exp = BACKOFF_BASE_SECS.saturating_mul(1u64 << consecutive.min(4));
     exp.clamp(BACKOFF_BASE_SECS, BACKOFF_CAP_SECS).max(retry_after_floor)
+}
+
+pub fn retry_after(header: Option<&str>, now: u64) -> u64 {
+    header.and_then(|h|h.trim().parse::<u64>().ok().or_else(||chrono::DateTime::parse_from_rfc2822(h).ok().map(|d|(d.timestamp_millis().max(0) as u64).saturating_sub(now).div_ceil(1000)))).unwrap_or(60).max(60)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn rate_limit_backoff_respects_server_floor() {
+        assert_eq!(backoff_secs(0,0),60); assert_eq!(backoff_secs(1,0),120);
+        assert_eq!(retry_after(Some("120"),0),120);
+        assert_eq!(retry_after(Some("Thu, 01 Jan 1970 00:02:00 +0000"),0),120);
+        assert_eq!(retry_after(Some("invalid"),0),60);
+        assert_eq!(backoff_secs(100,0),900); assert_eq!(backoff_secs(0,3600),3600);
+    }
 }
 
 fn set_and_broadcast(app: &AppHandle, mutate: impl FnOnce(&mut UsageSnapshot)) {
@@ -266,6 +280,7 @@ pub fn start(app: AppHandle) {
         }
         let mut consecutive_429: u32 = 0;
         loop {
+            if !crate::settings::enabled(&app,"claude") { std::thread::sleep(Duration::from_secs(1)); continue; }
             // No requests inside the backoff window
             let bu = {
                 let st = app.state::<AppState>();
@@ -319,7 +334,7 @@ pub fn start(app: AppHandle) {
                                     u.status = "stale".into();
                                 }
                                 u.note = format!("Rate limited, retrying in {wait}s");
-                                u.backoff_until = now_ms() + wait * 1000;
+                                u.backoff_until = now_ms().saturating_add(wait.saturating_mul(1000));
                             });
                         }
                         Err(FetchErr::Other(msg)) => set_and_broadcast(&app, |u| {

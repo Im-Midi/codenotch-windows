@@ -1,0 +1,9 @@
+{
+  "bundle": {
+    "resources": {
+      "../target/release/codenotch-hook.exe": "codenotch-hook.exe",
+      "../LICENSE": "LICENSE",
+      "glyphs/NOTICE.md": "ARTWORK-NOTICE.md"
+    }
+  }
+}

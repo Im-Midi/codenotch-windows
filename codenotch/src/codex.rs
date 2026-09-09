@@ -53,12 +53,19 @@ fn now_ms() -> u64 {
         .unwrap_or(0)
 }
 
-fn codex_home() -> Option<PathBuf> {
-    dirs::home_dir().map(|h| h.join(".codex"))
+static PROFILE: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+pub fn set_home(path: &str) {
+    let home = if !path.is_empty() { Some(PathBuf::from(path)) } else { std::env::var_os("CODEX_HOME").map(PathBuf::from).or_else(||dirs::home_dir().map(|h|h.join(".codex"))) };
+    if let Some(h)=home { let _=PROFILE.set(h); }
+}
+pub fn codex_home() -> Option<PathBuf> {
+    PROFILE.get().cloned().or_else(||std::env::var_os("CODEX_HOME").map(PathBuf::from)).or_else(||dirs::home_dir().map(|h|h.join(".codex")))
 }
 
 fn store_path() -> PathBuf {
-    crate::config::config_path().with_file_name("codex.json")
+    use std::hash::{Hash, Hasher};
+    let mut hash=std::collections::hash_map::DefaultHasher::new(); codex_home().hash(&mut hash);
+    crate::config::config_path().with_file_name(format!("codex-{:x}.json",hash.finish()))
 }
 
 pub fn load_persisted() -> UsageSnapshot {
@@ -77,7 +84,7 @@ pub fn load_persisted() -> UsageSnapshot {
 
 fn persist(s: &UsageSnapshot) {
     if let Ok(t) = serde_json::to_string_pretty(s) {
-        let _ = std::fs::write(store_path(), t);
+        let _ = crate::config::atomic_write(&store_path(), t.as_bytes());
     }
 }
 
@@ -178,7 +185,7 @@ enum LiveErr {
 }
 
 fn fetch_usage(cred: &Credential) -> Result<serde_json::Value, LiveErr> {
-    let resp = ureq::get(ENDPOINT)
+    let resp = ureq::AgentBuilder::new().redirects(0).build().get(ENDPOINT)
         .set("Authorization", &format!("Bearer {}", cred.access_token))
         .set("ChatGPT-Account-Id", &cred.account_id)
         .set("Accept", "application/json")
@@ -189,19 +196,12 @@ fn fetch_usage(cred: &Credential) -> Result<serde_json::Value, LiveErr> {
     match resp {
         Ok(r) => r.into_json().map_err(|e| LiveErr::Other(format!("parse: {e}"))),
         Err(ureq::Error::Status(code @ (401 | 403), r)) => {
-            // 401 is about the token; 403 can also be an edge node rejecting the user agent — record the status and the start of the body rather than folding both into "please sign in"
-            let head: String = r
-                .into_string()
-                .unwrap_or_default()
-                .chars()
-                .filter(|c| !c.is_control())
-                .take(160)
-                .collect();
-            crate::applog(&format!("codex: usage endpoint HTTP {code}: {head}"));
+            let _ = r;
+            crate::applog(&format!("codex: usage endpoint HTTP {code}"));
             Err(LiveErr::NeedsAuth)
         }
         Err(ureq::Error::Status(429, r)) => {
-            let ra = r.header("retry-after").and_then(|s| s.trim().parse::<u64>().ok()).unwrap_or(0);
+            let ra = crate::usage::retry_after(r.header("retry-after"),now_ms());
             Err(LiveErr::RateLimited(ra.max(BACKOFF_MIN_SECS)))
         }
         Err(ureq::Error::Status(code, _)) => Err(LiveErr::Other(format!("HTTP {code}"))),
@@ -237,7 +237,7 @@ fn label_for(window_minutes: Option<f64>, id: &str) -> String {
 }
 
 fn num(v: Option<&serde_json::Value>) -> Option<f64> {
-    v.and_then(|x| x.as_f64())
+    v.and_then(|x| x.as_f64()).filter(|n| n.is_finite() && *n >= 0.0)
 }
 
 /// Usage reply → windows. `additional_rate_limits` and `code_review_rate_limit` meter something
@@ -253,7 +253,7 @@ fn windows_from_usage(v: &serde_json::Value) -> Vec<LimitWindow> {
         let Some(pct) = num(w.get("used_percent")) else { continue };
         let resets_at = num(w.get("reset_at"))
             .map(|s| (s * 1000.0) as u64)
-            .or_else(|| num(w.get("reset_after_seconds")).map(|s| now + (s * 1000.0) as u64));
+            .or_else(|| num(w.get("reset_after_seconds")).map(|s| now.saturating_add((s * 1000.0) as u64)));
         out.push(LimitWindow {
             id: id.into(),
             label: label_for(num(w.get("limit_window_seconds")).map(|s| s / 60.0), id),
@@ -337,14 +337,14 @@ pub fn snapshot_from_rollout(text: &str) -> Option<(Vec<LimitWindow>, Option<u64
             .and_then(|x| x.as_str())
             .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
             .map(|d| d.timestamp_millis().max(0) as u64);
-        let now = now_ms();
+        let now = recorded.unwrap_or(0);
         let mut out = Vec::new();
         for id in ["primary", "secondary"] {
             let Some(w) = rl.get(id).filter(|x| x.is_object()) else { continue };
             let Some(pct) = num(w.get("used_percent")) else { continue };
             let resets_at = num(w.get("resets_at"))
                 .map(|s| (s * 1000.0) as u64)
-                .or_else(|| num(w.get("resets_in_seconds")).map(|s| now + (s * 1000.0) as u64));
+                .or_else(|| num(w.get("resets_in_seconds")).filter(|s| *s >= 0.0 && now > 0).map(|s| now.saturating_add((s * 1000.0) as u64)));
             out.push(LimitWindow {
                 id: id.into(),
                 label: label_for(num(w.get("window_minutes")), id),
@@ -373,7 +373,7 @@ pub fn present() -> bool {
 fn read_once() -> UsageSnapshot {
     let mut snap = UsageSnapshot::default();
     // Note attached to the fallback reading when the live read failed; needs_auth picks the empty state when there is no fallback either
-    let mut live_note: Option<String> = None;
+    let live_note: Option<String>;
     let mut needs_auth = false;
     let held_until = BACKOFF_UNTIL.load(std::sync::atomic::Ordering::Relaxed);
     let now = now_ms();
@@ -383,6 +383,8 @@ fn read_once() -> UsageSnapshot {
     } else {
         match load_credential() {
             None => {
+                needs_auth = true;
+                live_note = Some("Sign in through Codex to refresh usage. Any reading below is cached.".into());
                 if auth_path().map(|p| p.is_file()).unwrap_or(false) {
                     crate::applog("codex: auth.json has no usable access_token/account_id, falling back to the rollout");
                 }
@@ -411,7 +413,7 @@ fn read_once() -> UsageSnapshot {
                     });
                 }
                 Err(LiveErr::RateLimited(secs)) => {
-                    let until = now_ms() + secs * 1000;
+                    let until = now_ms().saturating_add(secs.saturating_mul(1000));
                     BACKOFF_UNTIL.store(until, std::sync::atomic::Ordering::Relaxed);
                     snap.backoff_until = until;
                     live_note = Some(format!("Rate limited — retrying in {secs}s"));
@@ -428,7 +430,7 @@ fn read_once() -> UsageSnapshot {
     match newest_rollout().and_then(|p| tail_text(&p)).and_then(|t| snapshot_from_rollout(&t)) {
         Some((windows, recorded, plan)) => {
             let rec = recorded.unwrap_or(0);
-            let fresh = rec > 0 && now_ms().saturating_sub(rec) <= CURRENT_FOR_MS;
+            let fresh = !needs_auth && rec > 0 && now_ms().saturating_sub(rec) <= CURRENT_FOR_MS;
             snap.status = if fresh { "ok" } else { "stale" }.into();
             snap.windows = windows;
             snap.fetched_at = rec; // the recorded time is what counts; the UI shows Updated N ago from it
@@ -497,7 +499,12 @@ pub fn start(app: AppHandle) {
             }
         }
         loop {
-            let snap = read_once();
+            if !crate::settings::enabled(&app,"codex") { std::thread::sleep(Duration::from_secs(1)); continue; }
+            let mut snap = read_once();
+            if snap.windows.is_empty() && snap.status != "needsAuth" {
+                let old=app.state::<AppState>().codex.lock().unwrap().clone();
+                if !old.windows.is_empty() { snap.windows=old.windows; snap.fetched_at=old.fetched_at; snap.status="stale".into(); }
+            }
             let hold = snap.backoff_until.saturating_sub(now_ms()) / 1000;
             broadcast(&app, snap);
             for _ in 0..POLL_SECS.max(hold) {
@@ -536,4 +543,30 @@ pub fn probe() -> String {
         roll.map(|p| p.display().to_string()).unwrap_or_else(|| "none".into()),
         age
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+    #[test]
+    fn windows_are_identified_by_duration_and_zero_is_a_reading() {
+        let v=json!({"rate_limit":{"primary_window":{"used_percent":0,"limit_window_seconds":604800,"reset_at":1800000000},"secondary_window":null}});
+        let w=windows_from_usage(&v); assert_eq!(w.len(),1); assert_eq!(w[0].used,0.0);
+        assert_eq!(w[0].label,"Weekly limit"); assert_eq!(w[0].resets_at,Some(1800000000000));
+        assert!(windows_from_usage(&json!({"rate_limit":{"primary_window":{"used_percent":null}}})).is_empty());
+        assert!(windows_from_usage(&json!({"rate_limit":{"primary_window":{"used_percent":-2}}})).is_empty());
+        for pct in [6,100,120] { let w=windows_from_usage(&json!({"rate_limit":{"primary_window":{"used_percent":pct}}})); assert_eq!(w[0].used,(pct as f64/100.0).min(1.0)); }
+    }
+    #[test]
+    fn rollout_relative_reset_uses_recording_time_and_skips_partial_lines() {
+        let line=json!({"timestamp":"2026-09-09T12:00:00Z","payload":{"rate_limits":{"primary":{"used_percent":6,"window_minutes":10080,"resets_in_seconds":60}}}}).to_string();
+        let input=format!("{line}\n{{\"payload\":");
+        let (windows,recorded,_)=snapshot_from_rollout(&input).unwrap();
+        assert_eq!(windows[0].resets_at,Some(recorded.unwrap()+60000));
+        assert_eq!(windows[0].used,0.06);
+        assert!(snapshot_from_rollout("not json\n{\"rate_limits\":null}").is_none());
+        let no_time=json!({"rate_limits":{"primary":{"used_percent":0,"resets_in_seconds":60}}}).to_string();
+        assert_eq!(snapshot_from_rollout(&no_time).unwrap().0[0].resets_at,None);
+    }
 }

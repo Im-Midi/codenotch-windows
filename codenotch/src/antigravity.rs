@@ -48,6 +48,7 @@ const QUOTA_SUMMARY: &str = "https://cloudcode-pa.googleapis.com/v1internal:retr
 const LS_SERVICE: &str = "/exa.language_server_pb.LanguageServerService/RetrieveUserQuotaSummary";
 const CSRF_HEADER: &str = "x-codeium-csrf-token";
 
+static BACKOFF_UNTIL: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 static REFRESH: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 pub fn request_refresh() {
@@ -84,7 +85,7 @@ pub fn load_persisted() -> UsageSnapshot {
 
 fn persist(s: &UsageSnapshot) {
     if let Ok(t) = serde_json::to_string_pretty(s) {
-        let _ = std::fs::write(store_path(), t);
+        let _ = crate::config::atomic_write(&store_path(), t.as_bytes());
     }
 }
 
@@ -341,7 +342,7 @@ fn read_credentials() -> Option<Creds> {
 
 /// Tier name ("Personal"/"Pro"…); 401/403 → NeedsAuth
 fn load_tier(token: &str) -> Result<String, String> {
-    let agent = ureq::AgentBuilder::new().timeout(Duration::from_secs(15)).build();
+    let agent = ureq::AgentBuilder::new().redirects(0).timeout(Duration::from_secs(15)).build();
     match agent
         .post(LOAD_CODE_ASSIST)
         .set("Authorization", &format!("Bearer {token}"))
@@ -363,6 +364,10 @@ fn load_tier(token: &str) -> Result<String, String> {
             Ok(tier.to_string())
         }
         Err(ureq::Error::Status(401, _)) | Err(ureq::Error::Status(403, _)) => Err("needsAuth".into()),
+        Err(ureq::Error::Status(429, r)) => {
+            BACKOFF_UNTIL.store(now_ms().saturating_add(crate::usage::retry_after(r.header("retry-after"),now_ms()).saturating_mul(1000)), std::sync::atomic::Ordering::Relaxed);
+            Err("Rate limited".into())
+        }
         Err(ureq::Error::Status(code, _)) => Err(format!("HTTP {code}")),
         Err(e) => Err(e.to_string()),
     }
@@ -370,13 +375,19 @@ fn load_tier(token: &str) -> Result<String, String> {
 
 /// Direct quota for licensed accounts; a personal account gets 403 → None (not an error)
 fn direct_quota(token: &str) -> Option<Vec<LimitWindow>> {
-    let agent = ureq::AgentBuilder::new().timeout(Duration::from_secs(15)).build();
-    let r = agent
+    let agent = ureq::AgentBuilder::new().redirects(0).timeout(Duration::from_secs(15)).build();
+    let response = agent
         .post(QUOTA_SUMMARY)
         .set("Authorization", &format!("Bearer {token}"))
         .set("Content-Type", "application/json")
-        .send_string("{}")
-        .ok()?;
+        .send_string("{}");
+    let r=match response {
+        Ok(r)=>r,
+        Err(ureq::Error::Status(429,r))=>{
+            BACKOFF_UNTIL.store(now_ms().saturating_add(crate::usage::retry_after(r.header("retry-after"),now_ms()).saturating_mul(1000)),std::sync::atomic::Ordering::Relaxed);return None;
+        }
+        Err(_)=>return None,
+    };
     let v: serde_json::Value = r.into_json().ok()?;
     let mut buckets: Vec<serde_json::Value> = Vec::new();
     if let Some(groups) = v.get("quotaGroups").and_then(|g| g.as_array()) {
@@ -464,6 +475,7 @@ struct Runtime {
 }
 
 fn read_once(rt: &mut Runtime, prev: &UsageSnapshot) -> UsageSnapshot {
+    if prev.backoff_until > now_ms() { return prev.clone(); }
     let mut snap = UsageSnapshot::default();
     // 1. Local bridge (the cached endpoint first; the port changes on every launch, so a miss is normal)
     let mut bridge_err = String::new();
@@ -537,6 +549,12 @@ fn read_once(rt: &mut Runtime, prev: &UsageSnapshot) -> UsageSnapshot {
         }
         None => {}
     }
+    let held=BACKOFF_UNTIL.load(std::sync::atomic::Ordering::Relaxed);
+    if held>now_ms() {
+        snap=prev.clone(); snap.backoff_until=held;
+        snap.status=if snap.windows.is_empty(){"backoff"}else{"stale"}.into();
+        snap.note="Rate limited. Waiting before retrying.".into(); return snap;
+    }
     // 4. Count fallback (derived: the card gets a ~ prefix and the ring draws only its track)
     let (n, latest) = requests_today();
     snap.status = "ok".into();
@@ -590,6 +608,7 @@ pub fn start(app: AppHandle) {
         }
         let mut rt = Runtime { endpoint: None, ever_bridged: false };
         loop {
+            if !crate::settings::enabled(&app,"gemini") { std::thread::sleep(Duration::from_secs(1)); continue; }
             let prev = {
                 let st = app.state::<AppState>();
                 let s = st.antigravity.lock().unwrap().clone();
