@@ -339,6 +339,35 @@ fn set_expanded(on: bool, rects: Option<Vec<[f64; 4]>>) {
     *HOT.lock().unwrap() = if on { Some(rects.unwrap_or_default()) } else { None };
 }
 
+/// The window is a large transparent rectangle (see NOTCH_W/NOTCH_H); without this, clicking the
+/// desktop anywhere behind that rectangle is swallowed by the notch instead of reaching what is
+/// underneath it. The page tracks the pill's (and, while hovered, the card's) real on-screen shape
+/// and reports it here in physical pixels; SetWindowRgn clips both painting and hit-testing to that
+/// shape, so only the visible pixels are clickable and the rest of the desktop stays reachable.
+#[tauri::command]
+fn report_hot_rect(app: AppHandle, rect: [f64; 4]) {
+    apply_hot_region(&app, rect);
+}
+
+#[cfg(windows)]
+fn apply_hot_region(app: &AppHandle, rect: [f64; 4]) {
+    use windows::Win32::Foundation::{BOOL, HWND};
+    use windows::Win32::Graphics::Gdi::{CreateRoundRectRgn, SetWindowRgn};
+    let Some(w) = app.get_webview_window("notch") else { return };
+    let Ok(h) = w.hwnd() else { return };
+    let hwnd = HWND(h.0 as isize as *mut core::ffi::c_void);
+    let (x, y, rw, rh) = (rect[0] as i32, rect[1] as i32, rect[2] as i32, rect[3] as i32);
+    if rw <= 0 || rh <= 0 {
+        return;
+    }
+    unsafe {
+        let rgn = CreateRoundRectRgn(x, y, x + rw, y + rh, 24, 24);
+        let _ = SetWindowRgn(hwnd, rgn, BOOL(1));
+    }
+}
+#[cfg(not(windows))]
+fn apply_hot_region(_app: &AppHandle, _rect: [f64; 4]) {}
+
 /// The WebView zoom currently applied (1.0 = uncorrected)
 static ZOOM: Mutex<f64> = Mutex::new(1.0);
 
@@ -617,6 +646,7 @@ fn main() {
             refresh_usage,
             open_usage_page,
             set_expanded,
+            report_hot_rect,
             report_dpr,
             log_js,
             focus_session,
