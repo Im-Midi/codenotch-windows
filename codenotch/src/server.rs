@@ -22,7 +22,7 @@ pub fn start(app: AppHandle, port: u16) {
                 .as_reader()
                 .take(256 * 1024)
                 .read_to_string(&mut body);
-            if url.starts_with("/event") {
+            if req.method()==&tiny_http::Method::Post && url.starts_with("/event?") && crate::settings::enabled(&app,"claude") {
                 let ev = parse(&url, &body);
                 let state = app.state::<AppState>();
                 let changed = {

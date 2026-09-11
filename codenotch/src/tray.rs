@@ -50,7 +50,12 @@ pub fn build_menu(app: &AppHandle, lang: &str) -> tauri::Result<Menu<Wry>> {
         .checked(crate::autostart::is_enabled())
         .build(app)?;
     let quit = MenuItemBuilder::with_id("quit", tr(lang, "quit")).build(app)?;
+    let settings = MenuItemBuilder::with_id("settings", "Settings and usage details...").build(app)?;
+    let visible = MenuItemBuilder::with_id("visible", "Show / hide notch").build(app)?;
+    let show = MenuItemBuilder::with_id("show", "Show notch now").build(app)?;
     MenuBuilder::new(app)
+        .items(&[&settings, &visible, &show])
+        .separator()
         .items(&[&install, &uninstall])
         .separator()
         .item(&lang_menu)
@@ -78,6 +83,9 @@ fn refresh_menu(app: &AppHandle) {
 
 fn handle(app: &AppHandle, id: &str) {
     match id {
+        "settings" => crate::settings::open_settings_from_tray(app),
+        "visible" => crate::settings::toggle(app),
+        "show" => crate::settings::show(app),
         "install" => notice(app, hooks_install::install()),
         "uninstall" => notice(app, hooks_install::uninstall()),
         "reset" => crate::reset_bar(app),
@@ -94,15 +102,7 @@ fn handle(app: &AppHandle, id: &str) {
             let _ = cmd.spawn();
         }
         "refresh" => {
-            {
-                let st = app.state::<crate::AppState>();
-                let mut u = st.usage.lock().unwrap();
-                u.backoff_until = 0;
-            }
-            crate::usage::request_refresh();
-            crate::codex::request_refresh();
-            crate::cursor::request_refresh();
-            crate::antigravity::request_refresh();
+            crate::refresh_usage(app.clone());
             let a = app.clone();
             std::thread::spawn(move || crate::reload_glyphs(&a));
         }

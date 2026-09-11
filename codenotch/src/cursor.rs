@@ -67,7 +67,7 @@ pub fn load_persisted() -> UsageSnapshot {
 
 fn persist(s: &UsageSnapshot) {
     if let Ok(t) = serde_json::to_string_pretty(s) {
-        let _ = std::fs::write(store_path(), t);
+        let _ = crate::config::atomic_write(&store_path(), t.as_bytes());
     }
 }
 
@@ -196,14 +196,16 @@ pub fn parse_summary(v: &serde_json::Value) -> (Vec<LimitWindow>, String) {
 
 enum FetchErr {
     NeedsAuth,
+    RateLimited(u64),
     Other(String),
 }
 
 fn fetch_once(cookie: &str) -> Result<serde_json::Value, FetchErr> {
-    let agent = ureq::AgentBuilder::new().timeout(Duration::from_secs(15)).build();
+    let agent = ureq::AgentBuilder::new().redirects(0).timeout(Duration::from_secs(15)).build();
     match agent.get(ENDPOINT).set("Cookie", cookie).set("Accept", "application/json").call() {
         Ok(r) => r.into_json::<serde_json::Value>().map_err(|e| FetchErr::Other(format!("parse: {e}"))),
         Err(ureq::Error::Status(401, _)) | Err(ureq::Error::Status(403, _)) => Err(FetchErr::NeedsAuth),
+        Err(ureq::Error::Status(429, r)) => Err(FetchErr::RateLimited(crate::usage::retry_after(r.header("retry-after"),now_ms()))),
         Err(ureq::Error::Status(code, _)) => Err(FetchErr::Other(format!("HTTP {code}"))),
         Err(e) => Err(FetchErr::Other(format!("{e}"))),
     }
@@ -219,6 +221,7 @@ fn cap(s: &str) -> String {
 
 fn read_once(prev: &UsageSnapshot) -> UsageSnapshot {
     let mut snap = prev.clone();
+    if snap.backoff_until > now_ms() { return snap; }
     let Some(creds) = read_credentials() else {
         snap.status = "needsAuth".into();
         snap.note = "Sign in to Cursor (the editor) to see usage.".into();
@@ -245,6 +248,11 @@ fn read_once(prev: &UsageSnapshot) -> UsageSnapshot {
         Err(FetchErr::NeedsAuth) => {
             snap.status = "needsAuth".into();
             snap.note = "Cursor session was rejected — sign in again in the editor".into();
+        }
+        Err(FetchErr::RateLimited(seconds)) => {
+            snap.backoff_until=now_ms().saturating_add(seconds.saturating_mul(1000));
+            snap.status=if snap.windows.is_empty() {"backoff"} else {"stale"}.into();
+            snap.note="Rate limited. Waiting before retrying.".into();
         }
         Err(FetchErr::Other(msg)) => {
             // Stale beats invented: keep the old reading, marked stale
@@ -288,6 +296,7 @@ pub fn start(app: AppHandle) {
             }
         }
         loop {
+            if !crate::settings::enabled(&app,"cursor") { std::thread::sleep(Duration::from_secs(1)); continue; }
             let prev = {
                 let st = app.state::<AppState>();
                 let s = st.cursor.lock().unwrap().clone();

@@ -1,6 +1,8 @@
 #![cfg_attr(all(not(debug_assertions), windows), windows_subsystem = "windows")]
 
 mod autostart;
+mod placement;
+mod settings;
 mod config;
 mod doctor;
 mod focus;
@@ -21,11 +23,8 @@ mod watcher;
 use std::sync::Mutex;
 use tauri::{AppHandle, Emitter, Manager};
 
-/// Logical size of the notch window: the 70 pt pill column on the right plus room for the hover card on the left.
-pub const NOTCH_W: f64 = 340.0;
 /// Hand-bumped build tag, written to run.log at startup so a log can always be matched to the exe that wrote it.
-pub const BUILD: &str = "r31";
-pub const NOTCH_H: f64 = 460.0; // 300 clipped the card once it held three window blocks plus the session list
+pub const BUILD: &str = "windows-0.4.1";
 
 pub struct AppState {
     pub store: Mutex<state::Store>,
@@ -59,141 +58,45 @@ pub fn broadcast(app: &AppHandle) {
     let _ = app.emit("state", &snap);
 }
 
-/// Pins the notch to the right edge of the primary monitor; the other edges are a later milestone.
-pub fn place_notch(app: &AppHandle) {
-    let Some(w) = app.get_webview_window("notch") else {
-        return;
-    };
-    let scale = w.scale_factor().unwrap_or(1.0);
-    if let Ok(Some(mon)) = w.primary_monitor() {
-        // Two monitors at different scales (150 % and 200 % in practice): the physical size can
-        // end up converted with the *other* monitor's scale factor depending on where the window
-        // is created and then moved, leaving the WebView ~256 logical px wide instead of 340.
-        // So the physical size is pinned straight from mon.scale_factor() before placing the
-        // window; if it still reports a different scale afterwards, it is pinned once more.
-        let ms = mon.scale_factor();
-        let target = tauri::PhysicalSize::new((NOTCH_W * ms).round() as u32, (NOTCH_H * ms).round() as u32);
-        let _ = w.set_size(target);
-        // Position from the window's measured physical size — deriving it from the scale factor
-        // pushed the window past the right edge at 125 % / 150 % (the ring's right side was clipped).
-        let (ww, wh) = w
-            .outer_size()
-            .map(|s| (s.width as i32, s.height as i32))
-            .unwrap_or(((NOTCH_W * scale) as i32, (NOTCH_H * scale) as i32));
-        let x = mon.position().x + mon.size().width as i32 - ww;
-        // Vertical position comes from the configured ratio (the pill can be dragged; it persists), clamped to the monitor
-        let ratio = {
-            let st = app.state::<AppState>();
-            let c = st.cfg.lock().unwrap();
-            c.notch_y.clamp(0.0, 1.0)
-        };
-        let mh = mon.size().height as i32;
-        let y = (mon.position().y as f64 + mh as f64 * ratio - wh as f64 / 2.0).round() as i32;
-        let y = y.clamp(mon.position().y, mon.position().y + (mh - wh).max(0));
-        let _ = w.set_position(tauri::PhysicalPosition::new(x, y));
-        if w.outer_size().map(|s| s.width != target.width).unwrap_or(false) {
-            let _ = w.set_size(target);
-            let x = mon.position().x + mon.size().width as i32 - target.width as i32;
-            let _ = w.set_position(tauri::PhysicalPosition::new(x, y));
-        }
-        // Placement log line: the first thing to check when the notch is not visible
-        let log = config::config_path().with_file_name("run.log");
-        let _ = std::fs::write(
-            log,
-            format!(
-                "notch placed build={BUILD}: pos=({x},{y}) size=({ww}x{wh}) inner={:?} win_scale={scale} mon_scale={ms} monitor=({},{} {}x{})\n",
-                w.inner_size().map(|s| (s.width, s.height)).unwrap_or((0, 0)),
-                mon.position().x,
-                mon.position().y,
-                mon.size().width,
-                mon.size().height
-            ),
-        );
-    }
-}
+pub fn place_notch(app: &AppHandle) { placement::apply(app); }
 
-/// Older entry point name still used by tray.rs
 pub fn reset_bar(app: &AppHandle) {
-    {
-        let st = app.state::<AppState>();
-        let mut c = st.cfg.lock().unwrap();
-        c.notch_y = 0.5;
-        config::save(&c);
-    }
+    let st = app.state::<AppState>();
+    let mut cfg = st.cfg.lock().unwrap().clone();
+    cfg.offsets[cfg.edge.index()] = 0.5;
+    if let Err(e) = config::try_save(&cfg) { let _=app.emit("notice", e); return; }
+    *st.cfg.lock().unwrap() = cfg;
     place_notch(app);
 }
 
-/// Drag along the right edge. The page calls this once after a press on the pill moves more than
-/// 4 px; from then on a Rust thread follows the system cursor (WebView mousemove is unreliable
-/// once the window itself starts moving). Releasing the left button ends the drag and the centre
-/// ratio is written back to the config.
 static DRAGGING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-
-#[cfg(windows)]
-fn left_button_down() -> bool {
-    use windows::Win32::UI::Input::KeyboardAndMouse::{GetAsyncKeyState, VK_LBUTTON};
-    unsafe { (GetAsyncKeyState(VK_LBUTTON.0 as i32) as u16 & 0x8000) != 0 }
-}
-#[cfg(not(windows))]
-fn left_button_down() -> bool {
-    false
-}
-
 #[tauri::command]
 fn drag_begin(app: AppHandle) {
-    if DRAGGING.swap(true, std::sync::atomic::Ordering::SeqCst) {
-        return;
-    }
+    let cfg = app.state::<AppState>().cfg.lock().unwrap().clone();
+    if !cfg.drag_enabled || DRAGGING.swap(true, std::sync::atomic::Ordering::SeqCst) { return; }
     std::thread::spawn(move || {
-        let Some(w) = app.get_webview_window("notch") else {
-            DRAGGING.store(false, std::sync::atomic::Ordering::SeqCst);
-            return;
-        };
-        let (Ok(start_cur), Ok(start_pos), Ok(size), Ok(Some(mon))) =
-            (app.cursor_position(), w.outer_position(), w.outer_size(), w.primary_monitor())
-        else {
-            DRAGGING.store(false, std::sync::atomic::Ordering::SeqCst);
-            return;
-        };
-        let (my, mh) = (mon.position().y, mon.size().height as i32);
-        let wh = size.height as i32;
-        let lo = my;
-        let hi = my + (mh - wh).max(0);
-        let mut last_y = start_pos.y;
-        let mut moved = false;
+        let Some(d) = placement::selected(&app, &cfg) else { DRAGGING.store(false,std::sync::atomic::Ordering::SeqCst); return; };
+        let area = if cfg.avoid_taskbar { d.work } else { d.bounds };
         loop {
-            if !left_button_down() {
-                break;
+            #[cfg(windows)]
+            unsafe {
+                use windows::Win32::UI::Input::KeyboardAndMouse::{GetAsyncKeyState,VK_LBUTTON};
+                if (GetAsyncKeyState(VK_LBUTTON.0 as i32) as u16 & 0x8000)==0 { break; }
             }
-            if let Ok(cur) = app.cursor_position() {
-                let ny = (start_pos.y as f64 + (cur.y - start_cur.y)).round() as i32;
-                let ny = ny.clamp(lo, hi);
-                if ny != last_y {
-                    last_y = ny;
-                    moved = true;
-                    let _ = w.set_position(tauri::PhysicalPosition::new(start_pos.x, ny));
-                }
+            #[cfg(not(windows))] { break; }
+            if let Ok(p) = app.cursor_position() {
+                let ratio = if cfg.edge.vertical() { (p.y-area.y as f64)/area.height as f64 } else { (p.x-area.x as f64)/area.width as f64 };
+                let st=app.state::<AppState>(); let mut c=st.cfg.lock().unwrap();
+                c.offsets[cfg.edge.index()]=ratio.clamp(0.0,1.0);
+                let _=app.emit("settings", c.clone());
             }
-            std::thread::sleep(std::time::Duration::from_millis(8));
+            std::thread::sleep(std::time::Duration::from_millis(25));
         }
-        if moved {
-            let ratio = ((last_y + wh / 2 - my) as f64 / mh as f64).clamp(0.0, 1.0);
-            let st = app.state::<AppState>();
-            let mut c = st.cfg.lock().unwrap();
-            c.notch_y = ratio;
-            config::save(&c);
-            applog(&format!("notch drag: y={last_y} ratio={ratio:.3}"));
-        }
-        DRAGGING.store(false, std::sync::atomic::Ordering::SeqCst);
-        let _ = app.emit("drag_end", moved);
+        let current=app.state::<AppState>().cfg.lock().unwrap().clone();
+        if let Err(e)=config::try_save(&current) { let _=app.emit("notice", e); }
+        DRAGGING.store(false,std::sync::atomic::Ordering::SeqCst);
+        let _=app.emit("drag_end", ());
     });
-}
-pub fn place_bar(app: &AppHandle) {
-    place_notch(app);
-}
-pub fn toggle_drag(app: &AppHandle) {
-    // The notch stays welded to the edge; kept as a no-op for the tray menu code path
-    let _ = app;
 }
 
 pub fn apply_lang(app: &AppHandle, lang: &str) {
@@ -218,18 +121,18 @@ fn noactivate(app: &AppHandle) {
         GetWindowLongPtrW, SetWindowLongPtrW, GWL_EXSTYLE, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW,
     };
     if let Some(w) = app.get_webview_window("notch") {
-        if let Ok(h) = w.hwnd() {
-            unsafe {
-                let hwnd =
-                    windows::Win32::Foundation::HWND(h.0 as isize as *mut core::ffi::c_void);
-                let ex = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
-                SetWindowLongPtrW(
-                    hwnd,
-                    GWL_EXSTYLE,
-                    ex | WS_EX_NOACTIVATE.0 as isize | WS_EX_TOOLWINDOW.0 as isize,
-                );
+        let _ = w.set_focusable(false);
+        // Tao queues style changes; apply tool-window flags after that queue is processed.
+        let _ = app.run_on_main_thread(move || {
+            if let Ok(h) = w.hwnd() {
+                unsafe {
+                    let hwnd = windows::Win32::Foundation::HWND(h.0 as *mut _);
+                    let ex = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
+                    SetWindowLongPtrW(hwnd, GWL_EXSTYLE,
+                        (ex | WS_EX_NOACTIVATE.0 as isize | WS_EX_TOOLWINDOW.0 as isize) & !0x00040000);
+                }
             }
-        }
+        });
     }
 }
 #[cfg(not(windows))]
@@ -251,11 +154,7 @@ fn get_usage(state: tauri::State<AppState>) -> usage::UsageSnapshot {
 
 #[tauri::command]
 fn refresh_usage(app: AppHandle) {
-    {
-        let st = app.state::<AppState>();
-        let mut u = st.usage.lock().unwrap();
-        u.backoff_until = 0;
-    }
+    let _ = app;
     usage::request_refresh();
     codex::request_refresh();
     cursor::request_refresh();
@@ -335,8 +234,10 @@ fn open_provider_page(provider: String) {
 static HOT: Mutex<Option<Vec<[f64; 4]>>> = Mutex::new(None);
 
 #[tauri::command]
-fn set_expanded(on: bool, rects: Option<Vec<[f64; 4]>>) {
-    *HOT.lock().unwrap() = if on { Some(rects.unwrap_or_default()) } else { None };
+fn set_expanded(app: AppHandle, on: bool, rects: Vec<[f64; 5]>) {
+    placement::set_region(&app, &rects);
+    *HOT.lock().unwrap() = Some(rects.iter().map(|r| [r[0],r[1],r[2],r[3]]).collect());
+    let _ = on;
 }
 
 /// The WebView zoom currently applied (1.0 = uncorrected)
@@ -358,12 +259,8 @@ pub fn applog(line: &str) {
 #[tauri::command]
 fn report_dpr(app: AppHandle, dpr: f64, w: f64, h: f64) {
     let Some(win) = app.get_webview_window("notch") else { return };
-    let want = win
-        .primary_monitor()
-        .ok()
-        .flatten()
-        .map(|m| m.scale_factor())
-        .unwrap_or_else(|| win.scale_factor().unwrap_or(1.0));
+    let cfg=app.state::<AppState>().cfg.lock().unwrap().clone();
+    let want = placement::selected(&app, &cfg).map(|m|m.scale).unwrap_or(1.0);
     let mut z = ZOOM.lock().unwrap();
     let base = if *z > 0.0 { dpr / *z } else { dpr };
     let target = if base > 0.0 { want / base } else { 1.0 };
@@ -371,12 +268,11 @@ fn report_dpr(app: AppHandle, dpr: f64, w: f64, h: f64) {
         "dpr report: dpr={dpr:.3} viewport={w:.0}x{h:.0} monitor_scale={want:.3} zoom_applied={:.3} -> target_zoom={target:.3}",
         *z
     ));
-    // Oscillation guard: at most three corrections per process (if the DPR does not follow the zoom, stop chasing it)
-    static APPLIED: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+
     if (dpr - want).abs() > 0.02
         && (target - *z).abs() > 0.01
         && (0.25..=4.0).contains(&target)
-        && APPLIED.fetch_add(1, std::sync::atomic::Ordering::Relaxed) < 3
+
     {
         match win.set_zoom(target) {
             Ok(()) => {
@@ -453,6 +349,12 @@ fn start_pointer_watchdog(app: AppHandle) {
 #[tauri::command]
 fn log_js(msg: String) {
     applog(&format!("js: {}", msg.chars().take(600).collect::<String>()));
+}
+
+#[tauri::command]
+fn ui_ready(app: AppHandle, width: f64, height: f64, dpr: f64) {
+    let info=serde_json::json!({"build":BUILD,"width":width,"height":height,"dpr":dpr,"displays":placement::displays(&app)});
+    let _=config::atomic_write(&config::config_path().with_file_name("window-check.json"),info.to_string().as_bytes());
 }
 
 #[tauri::command]
@@ -573,18 +475,28 @@ fn main() {
                 return;
             }
             "doctor" => {
+                codex::set_home(&config::load().codex_home);
+                let _ = std::fs::create_dir_all(config::config_path().parent().unwrap());
                 let out = if args.get(2).map(|s| s.as_str()) == Some("deep") { diag::run() } else { doctor::run() };
                 println!("{out}");
                 let log = config::config_path().with_file_name("doctor.log");
                 let _ = std::fs::write(log, &out);
                 return;
             }
+            "profile" => {
+                let mut cfg = config::load(); cfg.codex_home=args.get(2).cloned().unwrap_or_default();
+                report(config::try_save(&cfg).map(|_|"Codex profile saved. Restart Codenotch.".into())); return;
+            }
             _ => {}
         }
     }
 
     let cfg = config::load();
+    codex::set_home(&cfg.codex_home);
     let port = cfg.port;
+    let demo = args.iter().any(|a| a == "--demo");
+    let settings_at_launch = args.iter().any(|a| a == "--settings");
+    let _ = std::fs::create_dir_all(config::config_path().parent().unwrap());
 
     tauri::Builder::default()
         .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
@@ -604,6 +516,13 @@ fn main() {
             activity: Mutex::new(Vec::new()),
         })
         .invoke_handler(tauri::generate_handler![
+            settings::get_settings,
+            settings::get_displays,
+            settings::save_settings,
+            settings::open_settings,
+            settings::close_settings,
+            settings::quit_app,
+            ui_ready,
             get_state,
             get_usage,
             get_codex,
@@ -626,11 +545,14 @@ fn main() {
         .setup(move |app| {
             let handle = app.handle().clone();
             place_notch(&handle);
-            noactivate(&handle);
             if let Some(w) = handle.get_webview_window("notch") {
                 let _ = w.show();
             }
+            noactivate(&handle);
             tray::setup(&handle)?;
+            if settings_at_launch { let _=settings::open_settings_impl(handle.clone()); }
+            settings::start_display_watch(handle.clone());
+            if !demo {
             server::start(handle.clone(), port);
             watcher::start(handle.clone());
             usage::start(handle.clone());
@@ -638,6 +560,20 @@ fn main() {
             cursor::start(handle.clone());
             antigravity::start(handle.clone());
             activity::start(handle.clone());
+            } else {
+                let st=handle.state::<AppState>();
+                *st.codex.lock().unwrap() = usage::UsageSnapshot { status:"ok".into(), fetched_at:chrono::Utc::now().timestamp_millis() as u64,
+                    windows:vec![usage::LimitWindow {id:"primary".into(), label:"Weekly limit".into(), used:0.06, resets_at:Some(chrono::Utc::now().timestamp_millis() as u64+86400000*6), ..Default::default()}], note:"Demo data".into(), ..Default::default() };
+                *st.usage.lock().unwrap() = usage::UsageSnapshot {status:"none".into(), note:"Demo data".into(), ..Default::default()};
+                *st.cursor.lock().unwrap() = usage::UsageSnapshot {status:"absent".into(), ..Default::default()};
+                *st.antigravity.lock().unwrap() = usage::UsageSnapshot {status:"absent".into(), ..Default::default()};
+                *st.activity.lock().unwrap() = vec![activity::Activity {provider:"codex".into(), state:"busy".into(), name:"Codex".into(), detail:"Working".into(), since:chrono::Utc::now().timestamp_millis() as u64, inferred:false}];
+                let _=handle.emit("codex", st.codex.lock().unwrap().clone());
+                let _=handle.emit("usage", st.usage.lock().unwrap().clone());
+                let _=handle.emit("cursor", st.cursor.lock().unwrap().clone());
+                let _=handle.emit("antigravity", st.antigravity.lock().unwrap().clone());
+                let _=handle.emit("activity", st.activity.lock().unwrap().clone());
+            }
             // Collecting glyphs may read icon resources out of a few executables; do it off the main thread and push when done
             let gh = handle.clone();
             std::thread::spawn(move || reload_glyphs(&gh));
@@ -670,7 +606,7 @@ fn main() {
             {
                 let st = handle.state::<AppState>();
                 let c = st.cfg.lock().unwrap();
-                config::save(&c);
+                if !config::config_path().exists() { config::save(&c); }
             }
             Ok(())
         })

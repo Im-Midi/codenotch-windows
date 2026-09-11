@@ -1,0 +1,16 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Codenotch settings</title><link rel="stylesheet" href="settings.css"><script defer src="bridge.js"></script><script defer src="model.js"></script><script defer src="settings.js"></script></head>
+<body><main><header class="page-header"><div><h1>Codenotch</h1><p class="muted">Usage at the edge of your screen.</p></div><div class="window-actions"><button type="button" id="close-settings">Close</button><button type="button" id="quit-app">Quit</button></div></header>
+<form id="settings"><fieldset><legend>Placement</legend>
+<label for="monitor">Display</label><select id="monitor"><option value="">Primary display</option></select>
+<div class="pair"><div><label for="edge">Edge</label><select id="edge"><option value="right">Right</option><option value="left">Left</option><option value="top">Top</option><option value="bottom">Bottom</option></select></div><div><label for="scale">Size</label><select id="scale"><option value="0.75">Small · 75%</option><option value="1">Medium · 100%</option><option value="1.25">Large · 125%</option><option value="1.5">Extra large · 150%</option></select></div></div>
+<label for="position">Position along edge <output id="position-value">50%</output></label><input id="position" type="range" min="0" max="100" value="50">
+<label class="check"><input type="checkbox" id="avoid_taskbar"> Keep clear of the taskbar</label>
+<label class="check"><input type="checkbox" id="drag_enabled"> Unlock dragging along the edge</label>
+</fieldset><fieldset><legend>Visibility</legend>
+<label class="check"><input type="checkbox" id="always_on_top"> Always on top</label><label class="check"><input type="checkbox" id="auto_collapse"> Collapse to a small tab when not in use</label><label class="check"><input type="checkbox" id="hide_fullscreen"> Hide over full-screen applications</label><label class="check"><input type="checkbox" id="reduced_motion"> Reduce motion</label><p class="muted">Use the tray menu to show or hide the notch, or enable Start with Windows.</p>
+</fieldset><fieldset><legend>Providers</legend><p class="muted">Choose which providers to read. Move enabled providers into display order.</p><div id="providers"></div>
+<label for="headline">Codex ring shows</label><select id="headline"><option value="weekly">Weekly limit when available</option><option value="highest">Most used limit</option><option value="primary">Primary limit</option><option value="secondary">Secondary limit</option></select>
+<label for="profile">Codex profile folder</label><input id="profile" type="text" placeholder="Default: CODEX_HOME or your .codex folder" spellcheck="false"><p class="muted">Use an absolute path. Changing the profile saves these settings and restarts Codenotch. Credentials remain in Codex.</p>
+</fieldset><div class="actions"><button type="submit">Save settings</button><button type="button" id="refresh">Refresh readings</button></div><p id="message" role="status" aria-live="polite"></p></form>
+<section aria-labelledby="usage-title"><h2 id="usage-title">Usage details</h2><p class="muted">The same readings as the notch, accessible with the keyboard. Escape closes this window.</p><div id="readings"></div></section></main></body></html>

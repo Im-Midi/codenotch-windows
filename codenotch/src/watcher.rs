@@ -151,7 +151,7 @@ pub fn start(app: AppHandle) {
             }
         });
         let mut tracks: HashMap<PathBuf, Trk> = HashMap::new();
-        rescan(&app, &mut tracks); // scan once at startup: adopt sessions that were already active
+        if crate::settings::enabled(&app,"claude") { rescan(&app, &mut tracks); } // scan once at startup: adopt sessions that were already active
         let mut last_scan = std::time::Instant::now();
         // Throttling (this was the system-wide lag): while the desktop app streams, the transcript
         // fires dozens of modify events per second, and each one used to do a 256 KB tail read plus
@@ -161,6 +161,7 @@ pub fn start(app: AppHandle) {
         let mut last_ingest: HashMap<PathBuf, std::time::Instant> = HashMap::new();
         let mut dirty: std::collections::HashSet<PathBuf> = Default::default();
         loop {
+            if !crate::settings::enabled(&app,"claude") { while rx.try_recv().is_ok() {} dirty.clear(); std::thread::sleep(Duration::from_secs(1)); continue; }
             match rx.recv_timeout(Duration::from_millis(400)) {
                 Ok(Ok(ev)) => {
                     for p in ev.paths {

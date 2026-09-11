@@ -33,9 +33,9 @@ pub fn is_enabled() -> bool {
 
 pub fn enable() -> Result<String, String> {
     let exe = std::env::current_exe().map_err(|e| e.to_string())?;
-    let val = format!("\"{}\" --silent", exe.display());
+    let val = format!("\"{}\"", exe.display());
     match reg(&["add", RUN_KEY, "/v", NAME, "/t", "REG_SZ", "/d", &val, "/f"]) {
-        Some((true, _)) => Ok("start at sign-in enabled (silent until a session appears)".into()),
+        Some((true, _)) => Ok("start at sign-in enabled".into()),
         Some((false, out)) => Err(out),
         None => Err("reg.exe failed to run".into()),
     }
