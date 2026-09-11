@@ -4,7 +4,7 @@ A Windows 11 x64 desktop widget for AI usage and activity, built with **Rust + T
 
 ## Run
 
-Use `published/codenotch.exe`, or install `published/Codenotch_0.4.0_x64-setup.exe` when available. WebView2 is required; the installer checks for it. The installer is not code-signed.
+Use `published/codenotch.exe`, or install `published/Codenotch_0.4.1_x64-setup.exe` when available. WebView2 is required; the installer checks for it. The installer is not code-signed.
 
 ```powershell
 .\published\codenotch.exe --settings

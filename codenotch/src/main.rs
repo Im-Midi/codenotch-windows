@@ -24,7 +24,7 @@ use std::sync::Mutex;
 use tauri::{AppHandle, Emitter, Manager};
 
 /// Hand-bumped build tag, written to run.log at startup so a log can always be matched to the exe that wrote it.
-pub const BUILD: &str = "windows-0.4.0";
+pub const BUILD: &str = "windows-0.4.1";
 
 pub struct AppState {
     pub store: Mutex<state::Store>,
@@ -521,6 +521,7 @@ fn main() {
             settings::save_settings,
             settings::open_settings,
             settings::close_settings,
+            settings::quit_app,
             ui_ready,
             get_state,
             get_usage,
@@ -549,7 +550,7 @@ fn main() {
             }
             noactivate(&handle);
             tray::setup(&handle)?;
-            if settings_at_launch { let _=settings::open_settings(handle.clone()); }
+            if settings_at_launch { let _=settings::open_settings_impl(handle.clone()); }
             settings::start_display_watch(handle.clone());
             if !demo {
             server::start(handle.clone(), port);

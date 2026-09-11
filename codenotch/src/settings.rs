@@ -4,6 +4,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 pub static HIDDEN: AtomicBool = AtomicBool::new(false);
 static SHOW_FULLSCREEN: AtomicBool = AtomicBool::new(false);
+static SETTINGS_OPENING: AtomicBool = AtomicBool::new(false);
 
 pub fn enabled(app: &AppHandle, provider: &str) -> bool {
     app.state::<crate::AppState>().cfg.lock().unwrap().providers.iter().any(|p| p == provider)
@@ -36,18 +37,41 @@ pub fn save_settings(app: AppHandle, window: tauri::WebviewWindow, mut settings:
     Ok(())
 }
 
-#[tauri::command]
-pub fn open_settings(app: AppHandle) -> Result<(), String> {
+pub fn open_settings_impl(app: AppHandle) -> Result<(), String> {
     if let Some(w) = app.get_webview_window("settings") { w.show().map_err(|e|e.to_string())?; return w.set_focus().map_err(|e|e.to_string()); }
-    tauri::WebviewWindowBuilder::new(&app, "settings", tauri::WebviewUrl::App("settings.html".into()))
+    if SETTINGS_OPENING.swap(true, Ordering::AcqRel) { return Ok(()); }
+    let result = tauri::WebviewWindowBuilder::new(&app, "settings", tauri::WebviewUrl::App("settings.html".into()))
         .title("Codenotch settings").inner_size(660.0,780.0).min_inner_size(440.0,420.0)
-        .build().map(|_|()).map_err(|e|e.to_string())
+        .build().map(|_|()).map_err(|e|e.to_string());
+    SETTINGS_OPENING.store(false, Ordering::Release);
+    result
+}
+
+#[tauri::command]
+pub async fn open_settings(app: AppHandle) -> Result<(), String> {
+    open_settings_impl(app)
+}
+
+pub fn open_settings_from_tray(app: &AppHandle) {
+    let app = app.clone();
+    std::thread::spawn(move || {
+        if let Err(error) = open_settings_impl(app.clone()) {
+            crate::applog(&format!("Unable to open settings from tray: {error}"));
+        }
+    });
 }
 
 #[tauri::command]
 pub fn close_settings(window: tauri::WebviewWindow) -> Result<(), String> {
     if window.label() != "settings" { return Err("Only the settings window can close itself.".into()); }
     window.close().map_err(|e|e.to_string())
+}
+
+#[tauri::command]
+pub fn quit_app(app: AppHandle, window: tauri::WebviewWindow) -> Result<(), String> {
+    if window.label() != "settings" { return Err("Only the settings window can quit Codenotch.".into()); }
+    app.exit(0);
+    Ok(())
 }
 
 pub fn show(app: &AppHandle) {

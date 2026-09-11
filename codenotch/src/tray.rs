@@ -83,7 +83,7 @@ fn refresh_menu(app: &AppHandle) {
 
 fn handle(app: &AppHandle, id: &str) {
     match id {
-        "settings" => { let _=crate::settings::open_settings(app.clone()); },
+        "settings" => crate::settings::open_settings_from_tray(app),
         "visible" => crate::settings::toggle(app),
         "show" => crate::settings::show(app),
         "install" => notice(app, hooks_install::install()),

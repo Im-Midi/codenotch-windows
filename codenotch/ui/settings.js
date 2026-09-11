@@ -28,7 +28,9 @@ $('settings').addEventListener('submit',async e=>{
   try{await invoke('save_settings',{settings:next});cfg=next;message('Settings saved.');}catch(err){message(String(err),true);}
 });
 $('refresh').addEventListener('click',async()=>{try{await invoke('refresh_usage');message('Refresh requested. Provider cooldowns still apply.');}catch(e){message(String(e),true);}});
-document.addEventListener('keydown',e=>{if(e.key==='Escape'&&document.documentElement.dataset.preview!=='true')invoke('close_settings').catch(err=>message(String(err),true));});
+$('close-settings').addEventListener('click',()=>invoke('close_settings').catch(err=>message(String(err),true)));
+$('quit-app').addEventListener('click',()=>invoke('quit_app').catch(err=>message(String(err),true)));
+document.addEventListener('keydown',e=>{if(document.documentElement.dataset.preview==='true')return;if(e.key==='Escape'){invoke('close_settings').catch(err=>message(String(err),true));}else if(e.key.toLowerCase()==='q'&&(e.ctrlKey||e.metaKey)){e.preventDefault();invoke('quit_app').catch(err=>message(String(err),true));}});
 function render(){
   if(!cfg)return;
   $('readings').innerHTML=cfg.providers.map(id=>{const s=snaps[id]||{windows:[]};return `<article class="reading"><h3>${labels[id]}</h3><div class="muted">${M.escape(s.note||'Waiting for first reading')} ${s.fetched_at?'· Updated '+new Date(s.fetched_at).toLocaleTimeString():''} ${M.stale(s)?'· Not current':''}</div>${s.status==='needsAuth'?'':(s.windows||[]).map(w=>`<div class="window">${M.escape(w.label)}: ${w.count!=null?'~'+w.count+' requests':M.percent(w.used)+'% used · '+(100-M.percent(w.used))+'% left'}${w.count==null?`<progress value="${M.percent(w.used)}" max="100" aria-label="${M.escape(w.label)} used"></progress>`:''}${w.resets_at?'<span class="muted">Resets '+M.escape(new Date(w.resets_at).toLocaleString())+'</span>':''}</div>`).join('')}${activity.filter(a=>a.provider===id).map(a=>`<div class="activity">${M.escape(a.name)} · ${M.escape(a.detail)}${a.inferred?' · inferred':''}</div>`).join('')}</article>`;}).join('')||'<p>No providers enabled.</p>';
