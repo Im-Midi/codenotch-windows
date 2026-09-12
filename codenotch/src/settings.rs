@@ -116,13 +116,21 @@ fn url_is_plain(u: &str) -> bool {
 /// Removing those is Reset's job.
 #[tauri::command]
 pub fn save_router9(url: String, token: String, cf_id: String, cf_secret: String) -> Outcome {
-    let url = url.trim().trim_end_matches('/').to_string();
+    let url = crate::router9::normalize_base(&url);
     if !url.is_empty() && !((url.starts_with("http://") || url.starts_with("https://")) && url_is_plain(&url)) {
         return outcome(false, false, "Enter a plain URL starting with http:// or https://");
     }
-    let (cf_id, cf_secret) = (cf_id.trim().to_string(), cf_secret.trim().to_string());
+    let cf_id = crate::router9::clean_cf_value(&cf_id, "CF-Access-Client-Id");
+    let cf_secret = crate::router9::clean_cf_value(&cf_secret, "CF-Access-Client-Secret");
     if cf_id.is_empty() != cf_secret.is_empty() {
         return outcome(false, false, "A Cloudflare Access service token needs both the Client ID and the Client Secret");
+    }
+    if !cf_id.is_empty() && !cf_id.ends_with(".access") {
+        return outcome(false, false, "That isn't a Client ID — Cloudflare's end in “.access”. Check the two fields aren't swapped");
+    }
+    if token.trim().starts_with("sk-") {
+        return outcome(false, false,
+            "That's one of 9Router's proxy API keys (sk-…). Its usage API only accepts the CLI token — 16 hex characters worked out on the machine running 9Router");
     }
     let token = token.trim().to_string();
     let mut writes: Vec<(&str, &str)> = Vec::new();

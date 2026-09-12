@@ -11,7 +11,7 @@
 //! (`<data>/machine-id`, `<data>/auth/cli-secret`) — read only, borrowed the same way every other
 //! provider here borrows a credential, never generated or written by this process.
 //! Data dir (src/lib/dataDir.js): `%APPDATA%\9router` on Windows, unless `DATA_DIR` is set to a
-//! non-Unix-style path.
+//! non-Unix-style path. The `sk-…` API keys 9Router issues are for its LLM proxy and are refused here.
 //!
 //! A 9Router published on the internet is often behind Cloudflare Access (Zero Trust), which turns
 //! every request — even 9Router's public /api/health — into a redirect to its sign-in page. That is
@@ -97,9 +97,33 @@ pub fn present() -> bool {
 /// Base URL of the 9Router to read; a remote one can be named in the API-keys window.
 pub fn base_url() -> String {
     crate::secrets::get(crate::secrets::ROUTER9_URL)
-        .map(|u| u.trim().trim_end_matches('/').to_string())
+        .map(|u| normalize_base(&u))
         .filter(|u| !u.is_empty())
         .unwrap_or_else(|| format!("http://127.0.0.1:{}", port()))
+}
+
+/// 9Router's dashboard shows its LLM endpoint as `<host>/v1`, and that is the URL people copy —
+/// but the usage API lives at `<host>/api/usage/...`, so `/v1/api/usage/stats` is simply the wrong
+/// path. The proxy suffixes are dropped rather than rejected.
+pub fn normalize_base(u: &str) -> String {
+    let mut s = u.trim().trim_end_matches('/').to_string();
+    for suffix in ["/api/v1beta", "/api/v1", "/v1beta", "/v1"] {
+        if s.len() > suffix.len() && s.to_ascii_lowercase().ends_with(suffix) {
+            s.truncate(s.len() - suffix.len());
+            break;
+        }
+    }
+    s.trim_end_matches('/').to_string()
+}
+
+/// Cloudflare's copy button on a service token copies the whole header line
+/// (`CF-Access-Client-Id: <value>`), and sending that as the value is refused like a wrong token.
+pub fn clean_cf_value(v: &str, header: &str) -> String {
+    let v = v.trim();
+    match v.get(..header.len()) {
+        Some(head) if head.eq_ignore_ascii_case(header) => v[header.len()..].trim_start().trim_start_matches(':').trim().to_string(),
+        _ => v.to_string(),
+    }
 }
 
 /// Where the token in use comes from: pasted into the API-keys window, or computed from this PC's files
@@ -118,12 +142,19 @@ fn cli_token() -> Option<String> {
     crate::secrets::get(crate::secrets::ROUTER9_TOKEN).or_else(local_token)
 }
 
-/// Cloudflare Access service token (client id, client secret), when one is saved
+/// The easy mistake: pasting one of the `sk-…` keys the dashboard lists under "API Keys"
+fn saved_token_is_proxy_key() -> bool {
+    crate::secrets::get(crate::secrets::ROUTER9_TOKEN)
+        .map(|t| t.trim().starts_with("sk-"))
+        .unwrap_or(false)
+}
+
+/// Cloudflare Access service token (client id, client secret), when one is saved. Cleaned on the way
+/// out as well as on the way in, so a header line saved before that was fixed still works.
 pub fn cf_access() -> Option<(String, String)> {
-    Some((
-        crate::secrets::get(crate::secrets::ROUTER9_CF_ID)?,
-        crate::secrets::get(crate::secrets::ROUTER9_CF_SECRET)?,
-    ))
+    let id = clean_cf_value(&crate::secrets::get(crate::secrets::ROUTER9_CF_ID)?, "CF-Access-Client-Id");
+    let secret = clean_cf_value(&crate::secrets::get(crate::secrets::ROUTER9_CF_SECRET)?, "CF-Access-Client-Secret");
+    Some((id, secret))
 }
 
 /// The token this PC's own 9Router accepts, derived from the two files it persists to authenticate
@@ -168,6 +199,14 @@ fn access_message(with_token: bool) -> String {
         "Cloudflare Access refused the service token — check the 9Router application has a Service Auth policy that includes it".into()
     } else {
         "This URL is behind Cloudflare Access, which answered with its sign-in page instead of 9Router. Add a service token under “Behind Cloudflare Access?”".into()
+    }
+}
+
+fn rejected_message() -> String {
+    if saved_token_is_proxy_key() {
+        "Reached 9Router, but the saved token is one of its proxy API keys (sk-…). The usage API only accepts the CLI token".into()
+    } else {
+        "Reached 9Router, but it rejected this CLI token".into()
     }
 }
 
@@ -268,7 +307,7 @@ fn read_once() -> UsageSnapshot {
         }
         Err(FetchErr::NeedsAuth) => {
             snap.status = "needsAuth".into();
-            snap.note = "9Router rejected the CLI token".into();
+            snap.note = rejected_message();
             snap
         }
         Err(FetchErr::AccessBlocked { with_token }) => {
@@ -352,7 +391,7 @@ pub fn test() -> Result<String, TestFail> {
             let n = v.get("totalRequests").and_then(|x| x.as_i64()).unwrap_or(0);
             Ok(format!("Connected to {} · {n} request{} today", base_url(), if n == 1 { "" } else { "s" }))
         }
-        Err(FetchErr::NeedsAuth) => Err(fail("Reached 9Router, but it rejected this CLI token".into())),
+        Err(FetchErr::NeedsAuth) => Err(fail(rejected_message())),
         Err(FetchErr::AccessBlocked { with_token }) => {
             Err(TestFail { message: access_message(with_token), access_blocked: true })
         }
@@ -371,6 +410,7 @@ pub fn probe() -> String {
         dir.map(|d| d.display().to_string()).unwrap_or_else(|| "?".into()),
         if dir_ok { "found" } else { "not found" },
         match token_source() {
+            Some("saved") if saved_token_is_proxy_key() => "saved, but it is a proxy API key (sk-…), not the CLI token",
             Some("saved") => "saved in the API-keys window",
             Some(_) => "computed from local files",
             None => "unavailable (9Router has not run here; paste a token in the API-keys window for a remote one)",
@@ -386,12 +426,29 @@ mod tests {
     #[ignore = "needs CODENOTCH_TEST_R9_URL: a 9Router behind Cloudflare Access"]
     fn access_sign_in_is_recognised_not_parsed_as_json() {
         let url = std::env::var("CODENOTCH_TEST_R9_URL").expect("set CODENOTCH_TEST_R9_URL");
-        let r = super::fetch_stats_at(url.trim_end_matches('/'), "0000000000000000", None);
+        let r = super::fetch_stats_at(&super::normalize_base(&url), "0000000000000000", None);
         assert!(matches!(r, Err(super::FetchErr::AccessBlocked { with_token: false })));
     }
 
     #[test]
     fn redirect_host_drops_the_signed_query() {
         assert_eq!(super::host_of("https://team.cloudflareaccess.com/cdn-cgi/access/login/x?meta=eyJhbGci"), "team.cloudflareaccess.com");
+    }
+
+    #[test]
+    fn proxy_suffix_is_dropped_from_the_base() {
+        assert_eq!(super::normalize_base("https://r.example.net/v1/"), "https://r.example.net");
+        assert_eq!(super::normalize_base("https://r.example.net/API/v1"), "https://r.example.net");
+        assert_eq!(super::normalize_base("https://r.example.net/v1beta"), "https://r.example.net");
+        assert_eq!(super::normalize_base("http://127.0.0.1:20128"), "http://127.0.0.1:20128");
+        assert_eq!(super::normalize_base(""), "");
+    }
+
+    #[test]
+    fn copied_header_line_is_reduced_to_its_value() {
+        assert_eq!(super::clean_cf_value("CF-Access-Client-Id: abc.access", "CF-Access-Client-Id"), "abc.access");
+        assert_eq!(super::clean_cf_value("  cf-access-client-secret:cfast_x ", "CF-Access-Client-Secret"), "cfast_x");
+        assert_eq!(super::clean_cf_value("abc.access", "CF-Access-Client-Id"), "abc.access");
+        assert_eq!(super::clean_cf_value("é", "CF-Access-Client-Id"), "é"); // shorter than the header: no slicing panic
     }
 }
