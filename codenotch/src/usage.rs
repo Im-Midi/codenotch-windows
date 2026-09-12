@@ -11,6 +11,7 @@
 
 use crate::AppState;
 use serde::{Deserialize, Serialize};
+use std::path::PathBuf;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tauri::{AppHandle, Emitter, Manager};
 
@@ -126,8 +127,111 @@ pub fn probe_credentials() -> String {
             tok.len(),
             if expired { "expired — Claude Code refreshes it on its next use" } else { "valid" }
         ),
-        None => "credential: ~/.claude/.credentials.json not found (needsAuth; the desktop app may use another store — signing in once with the Claude Code CLI creates it)".into(),
+        None => "credential: ~/.claude/.credentials.json has no claudeAiOauth token (it can exist holding only MCP OAuth entries; signing in once with the Claude Code CLI adds one)".into(),
     }
+}
+
+/// For doctor: is Claude Desktop's own record available, and how old is it?
+pub fn probe_desktop() -> String {
+    match desktop_history() {
+        Some((w, recorded)) => {
+            let mins = now_ms().saturating_sub(recorded) / 60_000;
+            let levels: Vec<String> = w.iter().map(|x| format!("{} {:.0}%", x.label, x.used * 100.0)).collect();
+            format!("Claude Desktop history: {} ({} min old)", levels.join(", "), mins)
+        }
+        None => format!(
+            "Claude Desktop history: not found (looked in {})",
+            desktop_history_paths()
+                .iter()
+                .map(|p| p.display().to_string())
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+    }
+}
+
+// ---------------- Claude Desktop's own record ----------------
+
+/// Where Claude Desktop keeps the readings its usage panel draws: a plain JSON history,
+/// `{version, samples:[{t, org, u:{fh, sd}}]}`, appended every few minutes while the app runs.
+/// `fh` is the five-hour session window and `sd` the seven-day one, both whole percentages.
+///
+/// This is the only source that answers for someone who works in Claude Desktop rather than the
+/// Claude Code CLI: the OAuth path needs `~/.claude/.credentials.json`, and on such a machine that
+/// file can exist while holding nothing but MCP OAuth entries — no `claudeAiOauth` at all — so the
+/// notch showed a dark ring next to a Desktop window that was reporting usage perfectly well.
+/// Read only: no token, no request, no write. (Upstream reads Desktop's HTTP cache instead; that is
+/// the Simple Cache backend on macOS, while this build of Desktop uses the blockfile one, whose
+/// private format is far more work to walk for numbers this file already states outright.)
+fn desktop_history_paths() -> Vec<PathBuf> {
+    const NAME: &str = "plan-usage-history.json";
+    let mut out = Vec::new();
+    if let Some(roaming) = dirs::config_dir() {
+        out.push(roaming.join("Claude").join(NAME));
+    }
+    // Store/MSIX install: %LOCALAPPDATA%\Packages\Claude_<publisher>\LocalCache\Roaming\Claude
+    if let Some(local) = dirs::data_local_dir() {
+        if let Ok(rd) = std::fs::read_dir(local.join("Packages")) {
+            for e in rd.flatten() {
+                if e.file_name().to_string_lossy().starts_with("Claude") {
+                    out.push(e.path().join("LocalCache").join("Roaming").join("Claude").join(NAME));
+                }
+            }
+        }
+    }
+    out
+}
+
+/// Newest sample in Claude Desktop's history → (windows, when it was recorded).
+fn desktop_history() -> Option<(Vec<LimitWindow>, u64)> {
+    let mut best: Option<(u64, serde_json::Value)> = None;
+    for p in desktop_history_paths() {
+        let Ok(text) = std::fs::read_to_string(&p) else { continue };
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(&text) else { continue };
+        let Some(samples) = v.get("samples").and_then(|x| x.as_array()) else { continue };
+        // Appended in order, but the newest is taken by timestamp rather than by position
+        for s in samples.iter().rev().take(50) {
+            let Some(t) = s.get("t").and_then(|x| x.as_f64()) else { continue };
+            let t = t as u64;
+            if best.as_ref().map(|(bt, _)| t > *bt).unwrap_or(true) {
+                best = Some((t, s.clone()));
+            }
+        }
+    }
+    let (recorded, sample) = best?;
+    let u = sample.get("u")?;
+    let mut windows = Vec::new();
+    // Only these two are windows. `xu` also appears and is left alone: its meaning is not published
+    // anywhere, and a guessed ring is worse than no ring.
+    for (field, id) in [("fh", "session"), ("sd", "seven_day")] {
+        let Some(pct) = u.get(field).and_then(|x| x.as_f64()) else { continue };
+        windows.push(LimitWindow {
+            id: id.into(),
+            label: label_for(id),
+            used: (pct / 100.0).clamp(0.0, 1.0),
+            resets_at: None, // Desktop records the level, never the reset time
+            ..Default::default()
+        });
+    }
+    if windows.is_empty() {
+        return None;
+    }
+    Some((windows, recorded))
+}
+
+/// Applies the Desktop reading when the OAuth path cannot answer. `true` if it produced numbers.
+fn apply_desktop_fallback(app: &AppHandle, why: &str) -> bool {
+    let Some((windows, recorded)) = desktop_history() else { return false };
+    // Desktop appends every few minutes; anything within a quarter of an hour still reads as current
+    let fresh = now_ms().saturating_sub(recorded) <= 15 * 60 * 1000;
+    set_and_broadcast(app, |u| {
+        u.status = if fresh { "ok" } else { "stale" }.into();
+        u.windows = windows.clone();
+        u.fetched_at = recorded;
+        u.note = format!("{why} · from Claude Desktop");
+        u.backoff_until = 0;
+    });
+    true
 }
 
 fn parse_reset(v: &serde_json::Value) -> Option<u64> {
@@ -278,10 +382,14 @@ pub fn start(app: AppHandle) {
                 continue;
             }
             match read_credentials() {
-                None => set_and_broadcast(&app, |u| {
-                    u.status = "needsAuth".into();
-                    u.note = "No Claude Code credential found".into();
-                }),
+                None => {
+                    if !apply_desktop_fallback(&app, "No Claude Code sign-in") {
+                        set_and_broadcast(&app, |u| {
+                            u.status = "needsAuth".into();
+                            u.note = "No Claude Code credential found".into();
+                        })
+                    }
+                }
                 Some((token, expired)) => {
                     // On 401/403 re-read the credential and retry once (Claude Code may have just refreshed it)
                     let result = match fetch_once(&token) {
@@ -307,10 +415,14 @@ pub fn start(app: AppHandle) {
                                 u.backoff_until = 0;
                             });
                         }
-                        Err(FetchErr::NeedsAuth) => set_and_broadcast(&app, |u| {
-                            u.status = "needsAuth".into();
-                            u.note = auth_note.into();
-                        }),
+                        Err(FetchErr::NeedsAuth) => {
+                            if !apply_desktop_fallback(&app, auth_note) {
+                                set_and_broadcast(&app, |u| {
+                                    u.status = "needsAuth".into();
+                                    u.note = auth_note.into();
+                                })
+                            }
+                        }
                         Err(FetchErr::RateLimited(ra)) => {
                             consecutive_429 += 1;
                             let wait = backoff_secs(consecutive_429 - 1, ra);
