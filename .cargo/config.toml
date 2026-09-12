@@ -1,0 +1,6 @@
+# Static CRT: without this the exe imports VCRUNTIME140.dll and VCRUNTIME140_1.dll, so a machine
+# that has never installed the Visual C++ 2015-2022 redistributable refuses to start it ("VCRUNTIME140.dll
+# was not found"). Linking the CRT in leaves WebView2 as the only external runtime, and the NSIS
+# installer already fetches that one. Costs a little binary size, which `opt-level = "z"` offsets.
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static"]
