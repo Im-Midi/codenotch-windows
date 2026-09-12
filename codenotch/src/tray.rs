@@ -49,6 +49,38 @@ pub fn build_menu(app: &AppHandle, lang: &str) -> tauri::Result<Menu<Wry>> {
     let auto = CheckMenuItemBuilder::with_id("autostart", tr(lang, "autostart"))
         .checked(crate::autostart::is_enabled())
         .build(app)?;
+
+    let (free_move, opacity, notch_scale) = {
+        let st = app.state::<crate::AppState>();
+        let c = st.cfg.lock().unwrap();
+        (c.drag_enabled, c.opacity, c.scale)
+    };
+    let free = CheckMenuItemBuilder::with_id("free-move", tr(lang, "free_move"))
+        .checked(free_move)
+        .build(app)?;
+    let opacity_items: Vec<_> = [100u32, 85, 70, 55, 40]
+        .iter()
+        .map(|pct| {
+            CheckMenuItemBuilder::with_id(format!("opacity-{pct}"), format!("{pct}%"))
+                .checked((opacity * 100.0).round() as u32 == *pct)
+                .build(app)
+        })
+        .collect::<tauri::Result<_>>()?;
+    let opacity_refs: Vec<&dyn tauri::menu::IsMenuItem<Wry>> =
+        opacity_items.iter().map(|i| i as &dyn tauri::menu::IsMenuItem<Wry>).collect();
+    let opacity_menu = SubmenuBuilder::new(app, tr(lang, "opacity")).items(&opacity_refs).build()?;
+    let scale_items: Vec<_> = [80u32, 100, 125, 150]
+        .iter()
+        .map(|pct| {
+            CheckMenuItemBuilder::with_id(format!("scale-{pct}"), format!("{pct}%"))
+                .checked((notch_scale * 100.0).round() as u32 == *pct)
+                .build(app)
+        })
+        .collect::<tauri::Result<_>>()?;
+    let scale_refs: Vec<&dyn tauri::menu::IsMenuItem<Wry>> =
+        scale_items.iter().map(|i| i as &dyn tauri::menu::IsMenuItem<Wry>).collect();
+    let scale_menu = SubmenuBuilder::new(app, tr(lang, "size")).items(&scale_refs).build()?;
+
     let quit = MenuItemBuilder::with_id("quit", tr(lang, "quit")).build(app)?;
     MenuBuilder::new(app)
         .items(&[&install, &uninstall])
@@ -56,6 +88,9 @@ pub fn build_menu(app: &AppHandle, lang: &str) -> tauri::Result<Menu<Wry>> {
         .item(&lang_menu)
         .item(&refresh)
         .item(&reset)
+        .item(&free)
+        .item(&opacity_menu)
+        .item(&scale_menu)
         .item(&open_data)
         .item(&auto)
         .separator()
@@ -103,8 +138,46 @@ fn handle(app: &AppHandle, id: &str) {
             crate::codex::request_refresh();
             crate::cursor::request_refresh();
             crate::antigravity::request_refresh();
+            crate::commandcode::request_refresh();
+            crate::router9::request_refresh();
             let a = app.clone();
             std::thread::spawn(move || crate::reload_glyphs(&a));
+        }
+        "free-move" => {
+            {
+                let st = app.state::<crate::AppState>();
+                let mut c = st.cfg.lock().unwrap();
+                c.drag_enabled = !c.drag_enabled;
+                crate::config::save(&c);
+            }
+            crate::place_notch(app);
+            crate::emit_config(app);
+            refresh_menu(app);
+        }
+        _ if id.starts_with("opacity-") => {
+            if let Ok(pct) = id[8..].parse::<f64>() {
+                {
+                    let st = app.state::<crate::AppState>();
+                    let mut c = st.cfg.lock().unwrap();
+                    c.opacity = (pct / 100.0).clamp(0.15, 1.0);
+                    crate::config::save(&c);
+                }
+                crate::emit_config(app);
+                refresh_menu(app);
+            }
+        }
+        _ if id.starts_with("scale-") => {
+            if let Ok(pct) = id[6..].parse::<f64>() {
+                {
+                    let st = app.state::<crate::AppState>();
+                    let mut c = st.cfg.lock().unwrap();
+                    c.scale = (pct / 100.0).clamp(0.7, 1.6);
+                    crate::config::save(&c);
+                }
+                crate::place_notch(app);
+                crate::emit_config(app);
+                refresh_menu(app);
+            }
         }
         "autostart" => {
             let r = if crate::autostart::is_enabled() {

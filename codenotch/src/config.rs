@@ -8,23 +8,38 @@ pub struct Config {
     /// "auto" | "zh" | "en" | "ja" | "ko"
     #[serde(default = "default_lang")]
     pub lang: String,
+    /// Free-floating position (physical px, top-left), set after a drag while drag_enabled is true
     #[serde(default)]
     pub bar_x: Option<i32>,
     #[serde(default)]
     pub bar_y: Option<i32>,
-    /// Logical width of the bar (wheel-adjustable, 220-520); None = default 360
+    /// Logical width of the bar (wheel-adjustable, 220-520); None = default 360. Unused for now — reserved for a future free-floating layout.
     #[serde(default)]
     pub bar_w: Option<u32>,
-    /// Allow dragging + wheel resizing (tray toggle, off by default to prevent accidental drags)
+    /// "Move freely" (tray toggle, off by default to prevent accidental drags): true = unpinned
+    /// from the right edge, dragged anywhere on screen and placed at bar_x/bar_y; false = the
+    /// original edge notch, vertical-only drag along notch_y.
     #[serde(default)]
     pub drag_enabled: bool,
     /// Vertical position of the notch: the window centre as a fraction of the primary monitor's height (0 = top, 1 = bottom), default 0.5; saved after a drag
     #[serde(default = "default_notch_y")]
     pub notch_y: f64,
+    /// Window opacity, 0.15-1.0 (tray submenu)
+    #[serde(default = "default_opacity")]
+    pub opacity: f64,
+    /// Notch size multiplier, 0.7-1.6 (tray submenu)
+    #[serde(default = "default_scale")]
+    pub scale: f64,
 }
 
 fn default_notch_y() -> f64 {
     0.5
+}
+fn default_opacity() -> f64 {
+    1.0
+}
+fn default_scale() -> f64 {
+    1.0
 }
 
 fn default_port() -> u16 {
@@ -44,6 +59,8 @@ impl Default for Config {
             bar_w: None,
             drag_enabled: false,
             notch_y: default_notch_y(),
+            opacity: default_opacity(),
+            scale: default_scale(),
         }
     }
 }

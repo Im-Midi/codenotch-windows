@@ -119,6 +119,7 @@ let cursorSnap={status:'absent',windows:[],fetched_at:0,note:''};
 let agSnap={status:'absent',windows:[],fetched_at:0,note:''};
 let ccSnap={status:'absent',windows:[],fetched_at:0,note:''};
 let r9Snap={status:'absent',windows:[],fetched_at:0,note:''};
+let cfg={opacity:1,scale:1}; // window opacity + notch scale (tray menu); scale itself is applied by the Rust side resizing the window, then the existing DPR self-correction (fitZoom) zooms the content to fill it
 let glyphs={}; // id → {kind:'mark'|'appicon', url}
 let activity=[]; // working state of the non-Claude providers: {provider,state:'busy'|'waiting',name,detail,since}
 // "Is it working?" per provider: Claude from the four-state engine, the others from the activity probe. Returns running | attention | idle
@@ -399,6 +400,9 @@ listen('commandcode',e=>{ccSnap=e.payload||ccSnap;renderRing();if(card.classList
 invoke('get_commandcode').then(u=>{ccSnap=u||ccSnap;renderRing();}).catch(()=>{});
 listen('router9',e=>{r9Snap=e.payload||r9Snap;renderRing();if(card.classList.contains('show'))renderCard();}).catch(()=>{});
 invoke('get_router9').then(u=>{r9Snap=u||r9Snap;renderRing();}).catch(()=>{});
+function applyCfg(){ document.getElementById('root').style.opacity = (cfg.opacity!=null?cfg.opacity:1); }
+listen('config',e=>{cfg=e.payload||cfg;applyCfg();}).catch(()=>{});
+invoke('get_config').then(c=>{cfg=c||cfg;applyCfg();}).catch(()=>{});
 listen('glyphs',e=>{glyphs=e.payload||glyphs;renderRing();if(card.classList.contains('show'))renderCard();}).catch(()=>{});
 listen('activity',e=>{activity=e.payload||activity;renderRing();if(card.classList.contains('show'))renderCard();}).catch(()=>{});
 invoke('get_activity').then(a=>{activity=a||activity;renderRing();}).catch(()=>{});

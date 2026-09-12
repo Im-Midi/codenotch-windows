@@ -63,12 +63,18 @@ pub fn broadcast(app: &AppHandle) {
     let _ = app.emit("state", &snap);
 }
 
-/// Pins the notch to the right edge of the primary monitor; the other edges are a later milestone.
+/// Pins the notch to the right edge of the primary monitor, unless "move freely" is on, in which
+/// case it is sized the same way but placed at the saved bar_x/bar_y (anywhere on any monitor).
 pub fn place_notch(app: &AppHandle) {
     let Some(w) = app.get_webview_window("notch") else {
         return;
     };
     let scale = w.scale_factor().unwrap_or(1.0);
+    let (free_move, free_pos, notch_scale) = {
+        let st = app.state::<AppState>();
+        let c = st.cfg.lock().unwrap();
+        (c.drag_enabled, c.bar_x.zip(c.bar_y), c.scale.clamp(0.7, 1.6))
+    };
     if let Ok(Some(mon)) = w.primary_monitor() {
         // Two monitors at different scales (150 % and 200 % in practice): the physical size can
         // end up converted with the *other* monitor's scale factor depending on where the window
@@ -76,28 +82,39 @@ pub fn place_notch(app: &AppHandle) {
         // So the physical size is pinned straight from mon.scale_factor() before placing the
         // window; if it still reports a different scale afterwards, it is pinned once more.
         let ms = mon.scale_factor();
-        let target = tauri::PhysicalSize::new((NOTCH_W * ms).round() as u32, (NOTCH_H * ms).round() as u32);
+        let (nw, nh) = (NOTCH_W * notch_scale, NOTCH_H * notch_scale);
+        let target = tauri::PhysicalSize::new((nw * ms).round() as u32, (nh * ms).round() as u32);
         let _ = w.set_size(target);
         // Position from the window's measured physical size — deriving it from the scale factor
         // pushed the window past the right edge at 125 % / 150 % (the ring's right side was clipped).
         let (ww, wh) = w
             .outer_size()
             .map(|s| (s.width as i32, s.height as i32))
-            .unwrap_or(((NOTCH_W * scale) as i32, (NOTCH_H * scale) as i32));
-        let x = mon.position().x + mon.size().width as i32 - ww;
-        // Vertical position comes from the configured ratio (the pill can be dragged; it persists), clamped to the monitor
-        let ratio = {
-            let st = app.state::<AppState>();
-            let c = st.cfg.lock().unwrap();
-            c.notch_y.clamp(0.0, 1.0)
+            .unwrap_or(((nw * scale) as i32, (nh * scale) as i32));
+        let (x, y) = if free_move {
+            if let Some((fx, fy)) = free_pos {
+                clamp_to_virtual_screen(fx, fy, ww, wh)
+            } else {
+                // First time free mode is on with nothing dragged yet: start at the current edge position
+                let x = mon.position().x + mon.size().width as i32 - ww;
+                (x, mon.position().y + (mon.size().height as i32 - wh) / 2)
+            }
+        } else {
+            let x = mon.position().x + mon.size().width as i32 - ww;
+            // Vertical position comes from the configured ratio (the pill can be dragged; it persists), clamped to the monitor
+            let ratio = {
+                let st = app.state::<AppState>();
+                let c = st.cfg.lock().unwrap();
+                c.notch_y.clamp(0.0, 1.0)
+            };
+            let mh = mon.size().height as i32;
+            let y = (mon.position().y as f64 + mh as f64 * ratio - wh as f64 / 2.0).round() as i32;
+            (x, y.clamp(mon.position().y, mon.position().y + (mh - wh).max(0)))
         };
-        let mh = mon.size().height as i32;
-        let y = (mon.position().y as f64 + mh as f64 * ratio - wh as f64 / 2.0).round() as i32;
-        let y = y.clamp(mon.position().y, mon.position().y + (mh - wh).max(0));
         let _ = w.set_position(tauri::PhysicalPosition::new(x, y));
         if w.outer_size().map(|s| s.width != target.width).unwrap_or(false) {
             let _ = w.set_size(target);
-            let x = mon.position().x + mon.size().width as i32 - target.width as i32;
+            let x = if free_move { x } else { mon.position().x + mon.size().width as i32 - target.width as i32 };
             let _ = w.set_position(tauri::PhysicalPosition::new(x, y));
         }
         // Placement log line: the first thing to check when the notch is not visible
@@ -116,12 +133,36 @@ pub fn place_notch(app: &AppHandle) {
     }
 }
 
+/// Keeps a free-floating drag inside the combined bounds of every attached monitor (not just the
+/// primary one), so a drag onto a second screen at a different DPI still lands somewhere visible.
+#[cfg(windows)]
+fn clamp_to_virtual_screen(x: i32, y: i32, w: i32, h: i32) -> (i32, i32) {
+    use windows::Win32::UI::WindowsAndMessaging::{
+        GetSystemMetrics, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN,
+    };
+    unsafe {
+        let vx = GetSystemMetrics(SM_XVIRTUALSCREEN);
+        let vy = GetSystemMetrics(SM_YVIRTUALSCREEN);
+        let vw = GetSystemMetrics(SM_CXVIRTUALSCREEN);
+        let vh = GetSystemMetrics(SM_CYVIRTUALSCREEN);
+        let cx = x.clamp(vx, (vx + vw - w).max(vx));
+        let cy = y.clamp(vy, (vy + vh - h).max(vy));
+        (cx, cy)
+    }
+}
+#[cfg(not(windows))]
+fn clamp_to_virtual_screen(x: i32, y: i32, _w: i32, _h: i32) -> (i32, i32) {
+    (x, y)
+}
+
 /// Older entry point name still used by tray.rs
 pub fn reset_bar(app: &AppHandle) {
     {
         let st = app.state::<AppState>();
         let mut c = st.cfg.lock().unwrap();
         c.notch_y = 0.5;
+        c.bar_x = None;
+        c.bar_y = None;
         config::save(&c);
     }
     place_notch(app);
@@ -148,45 +189,85 @@ fn drag_begin(app: AppHandle) {
     if DRAGGING.swap(true, std::sync::atomic::Ordering::SeqCst) {
         return;
     }
+    let free_move = {
+        let st = app.state::<AppState>();
+        let c = st.cfg.lock().unwrap();
+        c.drag_enabled
+    };
     std::thread::spawn(move || {
         let Some(w) = app.get_webview_window("notch") else {
             DRAGGING.store(false, std::sync::atomic::Ordering::SeqCst);
             return;
         };
-        let (Ok(start_cur), Ok(start_pos), Ok(size), Ok(Some(mon))) =
-            (app.cursor_position(), w.outer_position(), w.outer_size(), w.primary_monitor())
+        let (Ok(start_cur), Ok(start_pos), Ok(size)) = (app.cursor_position(), w.outer_position(), w.outer_size())
         else {
             DRAGGING.store(false, std::sync::atomic::Ordering::SeqCst);
             return;
         };
-        let (my, mh) = (mon.position().y, mon.size().height as i32);
-        let wh = size.height as i32;
-        let lo = my;
-        let hi = my + (mh - wh).max(0);
-        let mut last_y = start_pos.y;
+        let (ww, wh) = (size.width as i32, size.height as i32);
         let mut moved = false;
-        loop {
-            if !left_button_down() {
-                break;
-            }
-            if let Ok(cur) = app.cursor_position() {
-                let ny = (start_pos.y as f64 + (cur.y - start_cur.y)).round() as i32;
-                let ny = ny.clamp(lo, hi);
-                if ny != last_y {
-                    last_y = ny;
-                    moved = true;
-                    let _ = w.set_position(tauri::PhysicalPosition::new(start_pos.x, ny));
+
+        if free_move {
+            // Anywhere on any monitor, both axes follow the cursor 1:1 from the press point.
+            let mut last = (start_pos.x, start_pos.y);
+            loop {
+                if !left_button_down() {
+                    break;
                 }
+                if let Ok(cur) = app.cursor_position() {
+                    let nx = (start_pos.x as f64 + (cur.x - start_cur.x)).round() as i32;
+                    let ny = (start_pos.y as f64 + (cur.y - start_cur.y)).round() as i32;
+                    let (nx, ny) = clamp_to_virtual_screen(nx, ny, ww, wh);
+                    if (nx, ny) != last {
+                        last = (nx, ny);
+                        moved = true;
+                        let _ = w.set_position(tauri::PhysicalPosition::new(nx, ny));
+                    }
+                }
+                std::thread::sleep(std::time::Duration::from_millis(8));
             }
-            std::thread::sleep(std::time::Duration::from_millis(8));
-        }
-        if moved {
-            let ratio = ((last_y + wh / 2 - my) as f64 / mh as f64).clamp(0.0, 1.0);
-            let st = app.state::<AppState>();
-            let mut c = st.cfg.lock().unwrap();
-            c.notch_y = ratio;
-            config::save(&c);
-            applog(&format!("notch drag: y={last_y} ratio={ratio:.3}"));
+            if moved {
+                let st = app.state::<AppState>();
+                let mut c = st.cfg.lock().unwrap();
+                c.bar_x = Some(last.0);
+                c.bar_y = Some(last.1);
+                config::save(&c);
+                applog(&format!("notch drag (free): pos=({},{})", last.0, last.1));
+            }
+        } else {
+            // Original behaviour: welded to the right edge, vertical-only.
+            let Ok(Some(mon)) = w.primary_monitor() else {
+                DRAGGING.store(false, std::sync::atomic::Ordering::SeqCst);
+                let _ = app.emit("drag_end", false);
+                return;
+            };
+            let (my, mh) = (mon.position().y, mon.size().height as i32);
+            let lo = my;
+            let hi = my + (mh - wh).max(0);
+            let mut last_y = start_pos.y;
+            loop {
+                if !left_button_down() {
+                    break;
+                }
+                if let Ok(cur) = app.cursor_position() {
+                    let ny = (start_pos.y as f64 + (cur.y - start_cur.y)).round() as i32;
+                    let ny = ny.clamp(lo, hi);
+                    if ny != last_y {
+                        last_y = ny;
+                        moved = true;
+                        let _ = w.set_position(tauri::PhysicalPosition::new(start_pos.x, ny));
+                    }
+                }
+                std::thread::sleep(std::time::Duration::from_millis(8));
+            }
+            if moved {
+                let ratio = ((last_y + wh / 2 - my) as f64 / mh as f64).clamp(0.0, 1.0);
+                let st = app.state::<AppState>();
+                let mut c = st.cfg.lock().unwrap();
+                c.notch_y = ratio;
+                config::save(&c);
+                applog(&format!("notch drag: y={last_y} ratio={ratio:.3}"));
+            }
         }
         DRAGGING.store(false, std::sync::atomic::Ordering::SeqCst);
         let _ = app.emit("drag_end", moved);
@@ -281,6 +362,21 @@ fn get_commandcode(state: tauri::State<AppState>) -> usage::UsageSnapshot {
 #[tauri::command]
 fn get_router9(state: tauri::State<AppState>) -> usage::UsageSnapshot {
     state.router9.lock().unwrap().clone()
+}
+
+#[tauri::command]
+fn get_config(state: tauri::State<AppState>) -> config::Config {
+    state.cfg.lock().unwrap().clone()
+}
+
+/// Pushes the current config to the page (opacity/scale live-applied via CSS) and repositions/resizes the window
+pub fn emit_config(app: &AppHandle) {
+    let cfg = {
+        let st = app.state::<AppState>();
+        let c = st.cfg.lock().unwrap();
+        c.clone()
+    };
+    let _ = app.emit("config", &cfg);
 }
 
 #[tauri::command]
@@ -631,6 +727,7 @@ fn main() {
             get_antigravity,
             get_commandcode,
             get_router9,
+            get_config,
             get_glyphs,
             get_activity,
             open_data_dir,
@@ -652,6 +749,7 @@ fn main() {
             if let Some(w) = handle.get_webview_window("notch") {
                 let _ = w.show();
             }
+            emit_config(&handle);
             tray::setup(&handle)?;
             server::start(handle.clone(), port);
             watcher::start(handle.clone());

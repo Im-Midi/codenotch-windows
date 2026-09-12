@@ -65,6 +65,18 @@ pub fn tr(lang: &str, key: &str) -> &'static str {
         (_, "hooks_missing") => "Hooks not installed: tray right-click → Install Claude Code hooks (desktop app auto-fallback active)",
         (_, "autostart") => "Start with Windows (silent)",
         (_, "refresh") => "Refresh usage now",
+        ("zh", "free_move") => "自由移动（取消贴边）",
+        ("ja", "free_move") => "自由に移動（端に固定しない）",
+        ("ko", "free_move") => "자유롭게 이동 (가장자리 고정 해제)",
+        (_, "free_move") => "Move freely (unpin from edge)",
+        ("zh", "opacity") => "透明度",
+        ("ja", "opacity") => "不透明度",
+        ("ko", "opacity") => "불투명도",
+        (_, "opacity") => "Opacity",
+        ("zh", "size") => "大小",
+        ("ja", "size") => "サイズ",
+        ("ko", "size") => "크기",
+        (_, "size") => "Size",
         _ => "?",
     }
 }
