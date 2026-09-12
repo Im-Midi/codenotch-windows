@@ -8,11 +8,16 @@ pub struct Config {
     /// "auto" | "zh" | "en" | "ja" | "ko"
     #[serde(default = "default_lang")]
     pub lang: String,
-    /// Free-floating position (physical px, top-left), set after a drag while drag_enabled is true
+    /// Free-floating position (physical px, window **centre**), set after a drag while drag_enabled
+    /// is true. Centre rather than top-left so the island keeps its place when it grows or shrinks.
     #[serde(default)]
     pub bar_x: Option<i32>,
     #[serde(default)]
     pub bar_y: Option<i32>,
+    /// Which screen edge the notch is docked to: "right" | "left" | "top" | "bottom".
+    /// A drag releases onto the nearest edge (AssistiveTouch-style), unless drag_enabled is on.
+    #[serde(default = "default_edge")]
+    pub edge: String,
     /// Logical width of the bar (wheel-adjustable, 220-520); None = default 360. Unused for now — reserved for a future free-floating layout.
     #[serde(default)]
     pub bar_w: Option<u32>,
@@ -34,6 +39,9 @@ pub struct Config {
 
 fn default_notch_y() -> f64 {
     0.5
+}
+fn default_edge() -> String {
+    "right".into()
 }
 fn default_opacity() -> f64 {
     1.0
@@ -59,6 +67,7 @@ impl Default for Config {
             bar_w: None,
             drag_enabled: false,
             notch_y: default_notch_y(),
+            edge: default_edge(),
             opacity: default_opacity(),
             scale: default_scale(),
         }

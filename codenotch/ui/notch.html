@@ -3,39 +3,122 @@
 <head>
 <meta charset="UTF-8">
 <style>
-  /* Visual reference: upstream docs/specs/2026-08-28-usage-notch-design.md, reproduced for Windows */
+  /* Visual reference: upstream docs/specs/2026-08-28-usage-notch-design.md, reproduced for Windows.
+     Motion: the notch rests as a slim handle and grows out of it on approach (AssistiveTouch), so the
+     desktop is not covered by a permanent panel. Everything that moves is transform/opacity only —
+     a transparent always-on-top window repaints through the desktop compositor, and animating layout
+     properties there stutters every other app on screen. */
   *{box-sizing:border-box} /* content-box padding once pushed the card past the window's left edge */
   html,body{margin:0;padding:0;width:100%;height:100%;background:transparent;overflow:hidden;user-select:none}
   body{font-family:"Segoe UI",system-ui,sans-serif;color:#fff}
-  #root{position:relative;width:100%;height:100%}
-
-  /* The pill on the right edge */
-  #pill{
-    position:absolute;right:0;top:50%;transform:translateY(-50%);
-    width:70px;padding:18px 0;background:#000;
-    border-radius:20px 0 0 20px;
-    /* Stays visible on dark wallpapers: a thin stroke plus a faint glow, the only outline when black sits on black */
-    border:1px solid #2e2e2e;border-right:none;
-    box-shadow:none;
-    display:flex;flex-direction:column;align-items:center;gap:14px;cursor:pointer;
+  #root{
+    position:relative;width:100%;height:100%;
+    /* Overshoot on the way out, settle on the way back: the difference is what reads as liquid rather than mechanical */
+    --spring:cubic-bezier(.34,1.8,.5,1);
+    --ease:cubic-bezier(.22,1,.36,1);
+    --ink:#000;--stroke:#2e2e2e;
   }
+
+  /* ---------- The resting handle ---------- */
+  #handle{
+    position:absolute;background:rgba(230,230,235,.34);
+    border-radius:99px;pointer-events:auto;cursor:pointer;
+    transition:opacity .22s var(--ease),transform .34s var(--spring),background .3s linear;
+    box-shadow:0 0 10px rgba(0,0,0,.35);
+  }
+  /* Every docked rule is scoped to data-mode="dock": free mode keeps its own data-edge (the edge it
+     would snap back to), so unscoped edge rules would leave e.g. right:0 set alongside left:50% and
+     stretch the island across the window instead of centring it. */
+  #root[data-mode="dock"][data-edge="right"] #handle{right:3px;top:50%;width:5px;height:104px;transform:translateY(-50%)}
+  #root[data-mode="dock"][data-edge="left"]  #handle{left:3px;top:50%;width:5px;height:104px;transform:translateY(-50%)}
+  #root[data-mode="dock"][data-edge="top"]   #handle{top:3px;left:50%;height:5px;width:104px;transform:translateX(-50%)}
+  #root[data-mode="dock"][data-edge="bottom"]#handle{bottom:3px;left:50%;height:5px;width:104px;transform:translateX(-50%)}
+  #root[data-mode="free"]  #handle{left:50%;top:50%;height:6px;width:104px;transform:translate(-50%,-50%)}
+  /* Opening: the handle stretches along its axis and dissolves into the pill growing over it */
+  #root[data-state="open"] #handle{opacity:0;pointer-events:none}
+  #root[data-state="open"][data-mode="dock"][data-edge="right"] #handle,
+  #root[data-state="open"][data-mode="dock"][data-edge="left"]  #handle{transform:translateY(-50%) scaleY(1.5)}
+  #root[data-state="open"][data-mode="dock"][data-edge="top"] #handle,
+  #root[data-state="open"][data-mode="dock"][data-edge="bottom"] #handle{transform:translateX(-50%) scaleX(1.5)}
+  #root[data-state="open"][data-mode="free"] #handle{transform:translate(-50%,-50%) scaleX(1.5)}
+
+  /* ---------- The pill ---------- */
+  #pill{
+    position:absolute;background:var(--ink);
+    border:1px solid var(--stroke);
+    display:flex;align-items:center;cursor:pointer;
+    opacity:0;pointer-events:none;
+    /* Grows out of the edge it is docked to, so the handle appears to swell into it */
+    transition:opacity .2s var(--ease),transform .42s var(--spring);
+  }
+  #root[data-state="open"] #pill{opacity:1;pointer-events:auto}
+  /* Side edges: a vertical column welded to the screen edge */
+  #root[data-mode="dock"][data-edge="right"] #pill{
+    right:0;top:50%;width:70px;padding:18px 0;flex-direction:column;gap:14px;
+    border-radius:20px 0 0 20px;border-right:none;
+    transform-origin:right center;transform:translateY(-50%) scale(.28);
+  }
+  #root[data-mode="dock"][data-edge="left"] #pill{
+    left:0;top:50%;width:70px;padding:18px 0;flex-direction:column;gap:14px;
+    border-radius:0 20px 20px 0;border-left:none;
+    transform-origin:left center;transform:translateY(-50%) scale(.28);
+  }
+  #root[data-state="open"][data-mode="dock"][data-edge="right"] #pill,
+  #root[data-state="open"][data-mode="dock"][data-edge="left"]  #pill{transform:translateY(-50%) scale(1)}
+  /* Top/bottom edges and free float: a Dynamic Island — one row, fully rounded, detached from the edge.
+     It hangs from the top of its own window so the card always has the room underneath it. */
+  #root[data-mode="dock"][data-edge="top"] #pill{
+    top:16px;left:50%;padding:12px 20px;flex-direction:row;gap:18px;border-radius:26px;
+    transform-origin:center top;transform:translateX(-50%) scale(.28);
+  }
+  #root[data-mode="dock"][data-edge="bottom"] #pill{
+    bottom:16px;left:50%;padding:12px 20px;flex-direction:row;gap:18px;border-radius:26px;
+    transform-origin:center bottom;transform:translateX(-50%) scale(.28);
+  }
+  #root[data-state="open"][data-mode="dock"][data-edge="top"] #pill,
+  #root[data-state="open"][data-mode="dock"][data-edge="bottom"] #pill{transform:translateX(-50%) scale(1)}
+  #root[data-mode="free"] #pill{
+    left:50%;top:16px;right:auto;bottom:auto;padding:12px 20px;flex-direction:row;gap:18px;border-radius:26px;
+    transform-origin:center top;transform:translateX(-50%) scale(.28);
+  }
+  #root[data-state="open"][data-mode="free"] #pill{transform:translateX(-50%) scale(1)}
+  /* Squash while being dragged: the island leans into the motion instead of sliding rigidly */
+  #root[data-drag="1"][data-mode="free"] #pill{transform:translateX(-50%) scale(1.05,.93)}
+  #root[data-drag="1"] #handle{background:rgba(230,230,235,.7)}
+
   /* Fillets: the concave arcs between the pill's top/bottom and the screen edge (the inverse rounded
      corner in the upstream design frame). An R×R black square hugs the edge and a radial gradient
-     punches out the circle of radius R centred on its outer corner; what remains is the arc. A 1 px
-     ring in the stroke colour joins the pill's own stroke (the outline cue on black wallpapers). */
-  #pill::before,#pill::after{
-    content:"";position:absolute;right:0;width:var(--fillet);height:var(--fillet);pointer-events:none;
-  }
+     punches out the circle of radius R centred on its outer corner; what remains is the arc. Side
+     edges only — an island floats clear of the edge and has nothing to blend into. */
+  #pill::before,#pill::after{content:"";position:absolute;width:var(--fillet);height:var(--fillet);pointer-events:none;display:none}
   #pill{--fillet:26px}
-  #pill::before{
-    top:calc(-1 * var(--fillet)); /* covers the 1 px stroke along the pill's top edge so there is no seam */
-    background:radial-gradient(circle at 0 0, transparent calc(var(--fillet) - 1.5px), #2e2e2e calc(var(--fillet) - 0.5px), #000 calc(var(--fillet) + 0.5px));
+  #root[data-mode="dock"][data-edge="right"] #pill::before,#root[data-mode="dock"][data-edge="right"] #pill::after,
+  #root[data-mode="dock"][data-edge="left"]  #pill::before,#root[data-mode="dock"][data-edge="left"]  #pill::after{display:block}
+  #root[data-edge="right"] #pill::before{
+    right:0;top:calc(-1 * var(--fillet)); /* covers the 1 px stroke along the pill's top edge so there is no seam */
+    background:radial-gradient(circle at 0 0, transparent calc(var(--fillet) - 1.5px), var(--stroke) calc(var(--fillet) - 0.5px), var(--ink) calc(var(--fillet) + 0.5px));
   }
-  #pill::after{
-    bottom:calc(-1 * var(--fillet));
-    background:radial-gradient(circle at 0 100%, transparent calc(var(--fillet) - 1.5px), #2e2e2e calc(var(--fillet) - 0.5px), #000 calc(var(--fillet) + 0.5px));
+  #root[data-edge="right"] #pill::after{
+    right:0;bottom:calc(-1 * var(--fillet));
+    background:radial-gradient(circle at 0 100%, transparent calc(var(--fillet) - 1.5px), var(--stroke) calc(var(--fillet) - 0.5px), var(--ink) calc(var(--fillet) + 0.5px));
   }
-  .cell{display:flex;flex-direction:column;align-items:center;gap:6px}
+  #root[data-edge="left"] #pill::before{
+    left:0;top:calc(-1 * var(--fillet));
+    background:radial-gradient(circle at 100% 0, transparent calc(var(--fillet) - 1.5px), var(--stroke) calc(var(--fillet) - 0.5px), var(--ink) calc(var(--fillet) + 0.5px));
+  }
+  #root[data-edge="left"] #pill::after{
+    left:0;bottom:calc(-1 * var(--fillet));
+    background:radial-gradient(circle at 100% 100%, transparent calc(var(--fillet) - 1.5px), var(--stroke) calc(var(--fillet) - 0.5px), var(--ink) calc(var(--fillet) + 0.5px));
+  }
+
+  /* ---------- Cells ---------- */
+  .cell{
+    display:flex;flex-direction:column;align-items:center;gap:6px;
+    opacity:0;transform:scale(.55);
+    transition:opacity .18s linear,transform .4s var(--spring);
+  }
+  /* Staggered so the row/column unfurls instead of appearing all at once */
+  #root[data-state="open"] .cell{opacity:1;transform:none;transition-delay:calc(var(--i,0) * 34ms)}
   .ringwrap{position:relative;width:56px;height:56px}
   .ringwrap > svg.ring{position:absolute;inset:0;overflow:visible} /* pins only the ring itself; an inline logo svg must not match this or it ends up in the top-left corner */
   .glyph{
@@ -53,6 +136,7 @@
   .c-head .mark svg{width:16px;height:16px;fill:currentColor}
   .pct{font-size:15px;font-weight:600;color:#fff;font-variant-numeric:tabular-nums}
   .dim{opacity:.55}
+  .ringwrap,.glyph{transition:opacity .25s linear}
   /* Session arc animation */
   @keyframes spin{to{transform:rotate(360deg)}}
   @keyframes pulse{0%,100%{opacity:1}50%{opacity:.25}}
@@ -61,22 +145,22 @@
   .arc-spin{animation:spin 1.2s steps(12) infinite;transform-origin:center}
   .arc-pulse{animation:pulse 1.1s steps(6) infinite}
 
-  /* Hover card, shown to the left of the pill */
+  /* ---------- Hover card ---------- */
   #card{
-    position:absolute;left:10px;right:80px;top:50%;transform:translateY(-50%);--tail:50%;
-    /* Anchored on both sides = fluid width: whatever the WebView's real logical width, the card cannot
-       extend past the window's left edge (a fixed max-width got clipped when the DPI disagreed).
-       The 246 cap matches the upstream spec. */
-    max-width:246px;margin-left:auto;background:#0a0a0a;border-radius:16px;padding:16px;
+    position:absolute;width:246px;max-width:calc(100% - 20px);--tail:50%;
+    background:#0a0a0a;border-radius:16px;padding:16px;
     overflow-wrap:anywhere;min-width:0;
     max-height:calc(100% - 16px);overflow:hidden; /* never taller than the window, however short it is */
-    display:none;
+    opacity:0;pointer-events:none;transform:scale(.9);
+    transition:opacity .16s linear,transform .34s var(--spring);
   }
-  #card.show{display:block}
-  #card::after{ /* solid triangle pointing at the pill */
-    content:"";position:absolute;right:-8px;top:var(--tail);transform:translateY(-50%);
-    border:8px solid transparent;border-right:none;border-left:10px solid #0a0a0a;
-  }
+  #card.show{opacity:1;pointer-events:auto;transform:none}
+  #card::after{content:"";position:absolute;border:8px solid transparent}
+  /* The tail points back at the pill, on whichever side the card had to open */
+  #card.tail-r::after{right:-8px;top:var(--tail);transform:translateY(-50%);border-right:none;border-left:10px solid #0a0a0a}
+  #card.tail-l::after{left:-8px;top:var(--tail);transform:translateY(-50%);border-left:none;border-right:10px solid #0a0a0a}
+  #card.tail-t::after{top:-8px;left:var(--tail);transform:translateX(-50%);border-top:none;border-bottom:10px solid #0a0a0a}
+  #card.tail-b::after{bottom:-8px;left:var(--tail);transform:translateX(-50%);border-bottom:none;border-top:10px solid #0a0a0a}
   .c-head{display:flex;align-items:center;gap:8px;margin-bottom:4px}
   .c-title{font-size:14px;font-weight:700}
   .c-sub{font-size:11px;color:#808080;margin-bottom:10px}
@@ -85,7 +169,7 @@
   .w-label{color:#e8e8ea;font-weight:600;white-space:nowrap}
   .w-reset{color:#808080;font-size:11px;white-space:nowrap;margin-left:auto} /* wrap as a whole when it does not fit; never break inside a word */
   .w-track{height:4px;border-radius:2px;background:#2d2d2d;margin:6px 0 4px;overflow:hidden}
-  .w-fill{height:100%;border-radius:2px}
+  .w-fill{height:100%;border-radius:2px;transition:width .5s var(--ease)}
   .w-used{font-size:11px;color:#808080}
   .c-note{font-size:12px;color:#c8c8c8;line-height:1.5;margin-top:6px}
   .c-sessions{margin-top:12px;border-top:1px solid #1e1e1e;padding-top:8px}
@@ -99,9 +183,10 @@
 </style>
 </head>
 <body>
-<div id="root">
+<div id="root" data-edge="right" data-mode="dock" data-state="idle">
   <div id="card"></div>
-  <div id="pill"></div><!-- one .cell per provider, stacked vertically (upstream: data-driven, the same layout for 1–5 cells) -->
+  <div id="handle"></div><!-- the resting state: a slim capsule at the edge, like the iOS home indicator -->
+  <div id="pill"></div><!-- one .cell per provider (column on a side edge, row as an island) -->
   <div id="notice"></div>
 </div>
 <script>
@@ -119,9 +204,42 @@ let cursorSnap={status:'absent',windows:[],fetched_at:0,note:''};
 let agSnap={status:'absent',windows:[],fetched_at:0,note:''};
 let ccSnap={status:'absent',windows:[],fetched_at:0,note:''};
 let r9Snap={status:'absent',windows:[],fetched_at:0,note:''};
-let cfg={opacity:1,scale:1}; // window opacity + notch scale (tray menu); scale itself is applied by the Rust side resizing the window, then the existing DPR self-correction (fitZoom) zooms the content to fill it
+let cfg={opacity:1,scale:1,edge:'right',drag_enabled:false};
 let glyphs={}; // id → {kind:'mark'|'appicon', url}
 let activity=[]; // working state of the non-Claude providers: {provider,state:'busy'|'waiting',name,detail,since}
+
+const root=document.getElementById('root'), card=document.getElementById('card');
+const pill=document.getElementById('pill'), handle=document.getElementById('handle');
+
+/* ---------- Open / closed ----------
+   The window itself resizes with the state (Rust side): an always-on-top window eats clicks over its
+   whole rectangle, so a notch that is "hidden" but still 340 px wide would quietly block the desktop.
+   Closed it is only the handle; opening grows the window first, then the pill springs out into it. */
+const OPEN_MS=420, CLOSE_MS=240;
+let state='idle', pendingShrink=null;
+function isIsland(){ return cfg.drag_enabled || cfg.edge==='top' || cfg.edge==='bottom'; }
+function openNotch(){
+  clearTimeout(pendingShrink); clearTimeout(dwellTimer);
+  if(state==='open') return;
+  state='open';
+  // Set the state synchronously rather than waiting on the resize or a frame callback: this window is
+  // WS_EX_NOACTIVATE and never focused, and requestAnimationFrame in a never-focused overlay is not
+  // reliably scheduled — deferring the class to one left the pill invisible with the window already open.
+  root.dataset.state='open';
+  renderRing();
+  invoke('notch_expand',{on:true}).catch(e=>notice('notch_expand failed: '+e));
+}
+function closeNotch(){
+  clearTimeout(dwellTimer);
+  if(state==='idle') return;
+  state='idle';
+  hideCard();
+  root.dataset.state='idle';
+  // Let the pill shrink away before the window does, or the last frames get clipped mid-animation
+  clearTimeout(pendingShrink);
+  pendingShrink=setTimeout(()=>invoke('notch_expand',{on:false}).catch(()=>{}),CLOSE_MS);
+}
+
 // "Is it working?" per provider: Claude from the four-state engine, the others from the activity probe. Returns running | attention | idle
 function workState(id){
   if(id==='claude'){
@@ -168,22 +286,27 @@ function svgArc(r,frac,color,width,extra=''){
     transform="rotate(-90 28 28)" ${extra}/>`;
 }
 
-function headline(){ // the cell shows the most constrained window — the one that will stop you first
-  if(!usage.windows.length) return null;
-  return usage.windows.reduce((a,b)=> b.used>a.used?b:a);
-}
-
-function isStale(){
-  if(usage.status==='stale') return true;
-  return usage.fetched_at>0 && (Date.now()-usage.fetched_at)>5*60*1000;
+/* The handle carries the one number that matters while closed: it takes the colour of the most
+   constrained provider, so a glance at the edge still says "you are fine" or "you are nearly out". */
+function tintHandle(){
+  let worst=null;
+  for(const p of providers()){
+    const h=headlineOf(p.snap);
+    if(h&&h.count==null&&(worst==null||h.used>worst)) worst=h.used;
+  }
+  const anyWorking=providers().some(p=>workState(p.id)==='running');
+  handle.style.background = worst==null ? 'rgba(230,230,235,.34)' : tone(worst);
+  handle.style.opacity = state==='open' ? '' : (anyWorking?'.95':'.62');
 }
 
 function renderRing(){
   const ps=providers();
+  tintHandle();
+  if(state!=='open') return; // nothing of the pill is on screen while closed; skip the DOM work entirely
   // Rebuild the DOM only when the structure changes (never swap the element under the cursor)
   const want=ps.map(p=>p.id+':'+(glyphs[p.id]?glyphs[p.id].kind:'-')).join(',');
   if(pill.dataset.cells!==want){
-    pill.innerHTML=ps.map(p=>`<div class="cell" data-p="${p.id}">
+    pill.innerHTML=ps.map((p,i)=>`<div class="cell" data-p="${p.id}" style="--i:${i}">
       <div class="ringwrap"><svg class="ring" viewBox="0 0 56 56"></svg><div class="glyph ${(!glyphs[p.id]&&p.glyph.length>1)?'small':''}">${glyphHtml(p)}</div></div>
       <div class="pct">—</div></div>`).join('');
     pill.dataset.cells=want;
@@ -229,7 +352,7 @@ const STATE_DOT={running:RUNGREEN,attention:AMBER,done:'#57c7ff'};
 
 let hoverId='claude';
 function renderCard(){
-  const c=document.getElementById('card');
+  const c=card;
   const p=providers().find(x=>x.id===hoverId)||providers()[0];
   const snap=p.snap;
   const headIcon=glyphHtml(p,true);
@@ -278,25 +401,40 @@ function renderCard(){
   c.innerHTML=html;
   placeCard();
 }
-// The card follows the hovered cell: vertically centred on it (kept inside the window), tail pointing at it
+/* The card opens on the free side of the pill and its tail points back at the hovered cell:
+   beside it on a side edge, under/over it in island form. */
 function placeCard(){
   const cell=pill.querySelector(`.cell[data-p="${hoverId}"]`)||pill;
-  const cr=cell.getBoundingClientRect();
-  const cy=cr.top+cr.height/2;
-  const H=innerHeight, ch=card.offsetHeight||0;
-  let top=Math.round(cy-ch/2); top=Math.max(8,Math.min(top,H-ch-8));
-  card.style.top=top+'px'; card.style.transform='none';
-  card.style.setProperty('--tail',Math.max(16,Math.min(ch-16,Math.round(cy-top)))+'px');
+  const cr=cell.getBoundingClientRect(), pr=pill.getBoundingClientRect();
+  const W=innerWidth, H=innerHeight, cw=card.offsetWidth||246, ch=card.offsetHeight||0;
+  card.classList.remove('tail-r','tail-l','tail-t','tail-b');
+  if(isIsland()||cfg.edge==='top'||cfg.edge==='bottom'){
+    const below = cfg.edge!=='bottom';
+    const cx=cr.left+cr.width/2;
+    let left=Math.round(cx-cw/2); left=Math.max(8,Math.min(left,W-cw-8));
+    let top = below ? Math.round(pr.bottom+10) : Math.round(pr.top-ch-10);
+    top=Math.max(8,Math.min(top,H-ch-8));
+    card.style.left=left+'px'; card.style.top=top+'px';
+    card.classList.add(below?'tail-t':'tail-b');
+    card.style.setProperty('--tail',Math.max(16,Math.min(cw-16,Math.round(cx-left)))+'px');
+  }else{
+    const onLeft = cfg.edge!=='left'; // docked right → card opens to the left, and vice versa
+    const cy=cr.top+cr.height/2;
+    let top=Math.round(cy-ch/2); top=Math.max(8,Math.min(top,H-ch-8));
+    card.style.top=top+'px';
+    card.style.left = onLeft ? Math.max(8,Math.round(pr.left-cw-12))+'px' : Math.round(pr.right+12)+'px';
+    card.classList.add(onLeft?'tail-r':'tail-l');
+    card.style.setProperty('--tail',Math.max(16,Math.min(ch-16,Math.round(cy-top)))+'px');
+  }
 }
 
 function esc(s){const d=document.createElement('div');d.textContent=s||'';return d.innerHTML;}
 
 /* Hover: stays expanded while either the pill or the card is under the cursor; collapses after a 250 ms grace period (upstream motion rule) */
-const card=document.getElementById('card'), pill=document.getElementById('pill');
-let hideTimer=null;
+let hideTimer=null, dwellTimer=null;
 function showCard(){clearTimeout(hideTimer);card.classList.add('show');renderCard();armWatchdog();} // show first, then render: placeCard needs offsetHeight
 function hideCard(){card.classList.remove('show');invoke('set_expanded',{on:false,rects:null}).catch(()=>{});}
-function scheduleHide(){clearTimeout(hideTimer);hideTimer=setTimeout(hideCard,250);}
+function scheduleHide(){clearTimeout(hideTimer);hideTimer=setTimeout(()=>{hideCard();closeNotch();},250);}
 // ===== Diagnostics + geometry =====
 function jslog(m){invoke('log_js',{msg:String(m)}).catch(()=>{});}
 function callq(cmd,args){ // invoke with visible failure: any command error is reported on screen (a silent .catch used to swallow them)
@@ -310,16 +448,27 @@ function armWatchdog(){
     callq('set_expanded',{on:true,rects:[rectOf(pill),rectOf(card)]}).catch(()=>{});
   });
 }
-// Viewport fit (pure front-end fallback, independent of Rust): the window is 340 × primary scale physical px,
-// so if this page's CSS viewport is not 340 wide the WebView's DPR disagrees with the monitor; CSS zoom pulls the layout back to the design size.
+/* Design width for the current mode, mirroring the Rust constants (NOTCH_W / ISLAND_W / HANDLE_*).
+   Deliberately *unscaled*: the window is sized scale× larger on the Rust side, so the leftover
+   mismatch measured here is exactly the user's size setting and fitZoom turns it into content zoom. */
+function designWidth(){
+  if(state!=='open') return isIsland()?132:18;
+  return isIsland()?560:340;
+}
+// Viewport fit (pure front-end fallback, independent of Rust): if this page's CSS viewport is not the
+// design width, the WebView's DPR disagrees with the monitor (or the user picked a size); CSS zoom pulls the layout back.
 function fitZoom(){
-  const z=innerWidth/340;
+  // Clamped: designWidth() depends on the mode, and the mode arrives with the config a moment after
+  // load. An unclamped ratio turned a 132 px island handle measured against the 18 px docked handle
+  // into a 7.3× zoom that wrecked the whole layout. A real DPI mismatch or size setting is never
+  // anywhere near this far out, so clamping costs nothing and makes the transient harmless.
+  const z=Math.min(3,Math.max(0.4,innerWidth/designWidth()));
   document.documentElement.style.zoom=(Math.abs(z-1)>0.02)?String(z):'';
   return z;
 }
 function reportDpr(){
   const z=fitZoom();
-  jslog(`dpr=${window.devicePixelRatio} inner=${innerWidth}x${innerHeight} cssZoom=${z.toFixed(3)}`);
+  jslog(`dpr=${window.devicePixelRatio} inner=${innerWidth}x${innerHeight} cssZoom=${z.toFixed(3)} state=${state}`);
   callq('report_dpr',{dpr:window.devicePixelRatio||1,w:innerWidth,h:innerHeight}).catch(()=>{});
 }
 reportDpr();
@@ -335,8 +484,9 @@ function cellAt(x,y){
   return null;
 }
 function pointerInHot(x,y){
+  if(state!=='open') return inRect(x,y,handle.getBoundingClientRect(),8);
   const p=pill.getBoundingClientRect();
-  if(inRect(x,y,p,4))return true;
+  if(inRect(x,y,p,6))return true;
   if(!card.classList.contains('show'))return false;
   const c=card.getBoundingClientRect();
   if(inRect(x,y,c,4))return true;
@@ -349,40 +499,54 @@ document.addEventListener('mousemove',e=>{
   const hot=pointerInHot(e.clientX,e.clientY);
   if(hot){
     clearTimeout(hideTimer);
+    if(state!=='open'){
+      // A short dwell before opening, so sweeping the cursor past the edge does not fling the panel open
+      if(!dwellTimer) dwellTimer=setTimeout(()=>{dwellTimer=null;openNotch();},200);
+      return;
+    }
     const id=cellAt(e.clientX,e.clientY);
     if(id&&id!==hoverId){ hoverId=id; if(card.classList.contains('show')){ renderCard(); armWatchdog(); } }
     if(!card.classList.contains('show')) showCard();
   }
-  else if(card.classList.contains('show')){ if(hideLogged++<5) jslog(`mousemove left the hot area -> collapse at ${e.clientX},${e.clientY}`); scheduleHide(); }
+  else{
+    clearTimeout(dwellTimer); dwellTimer=null;
+    if(state==='open'){ if(hideLogged++<5) jslog(`mousemove left the hot area -> collapse at ${e.clientX},${e.clientY}`); scheduleHide(); }
+  }
 });
 document.addEventListener('mouseout',e=>{ // relatedTarget null = the cursor left the page
-  if(!e.relatedTarget && card.classList.contains('show')){ if(hideLogged++<5) jslog('mouseout left the page -> collapse'); scheduleHide(); }
+  if(!e.relatedTarget){ clearTimeout(dwellTimer); dwellTimer=null; if(state==='open'){ if(hideLogged++<5) jslog('mouseout left the page -> collapse'); scheduleHide(); } }
 });
-listen('pointer_left',()=>{clearTimeout(hideTimer);hideCard();}).catch(()=>{});
+listen('pointer_left',()=>{clearTimeout(hideTimer);hideCard();closeNotch();}).catch(()=>{});
 // Card content changes change its height -> report the hot rectangles again
 listen('usage',()=>{if(card.classList.contains('show'))armWatchdog();}).catch(()=>{});
 listen('state',()=>{if(card.classList.contains('show'))armWatchdog();}).catch(()=>{});
-/* The pill can be dragged up and down the right edge. Press and move more than 4 px = drag (handed to Rust,
-   which follows the system cursor; the card is collapsed first); release without moving = click (opens the provider's usage page). */
+/* Press and move more than 4 px = drag (handed to Rust, which follows the system cursor); released on
+   a side it snaps to that edge, or stays put in island mode. A press without movement opens the notch
+   (closed) or the provider's usage page (open). */
 let press=null, dragging=false;
-pill.addEventListener('mousedown',e=>{ if(e.button!==0)return; press={x:e.clientX,y:e.clientY,id:cellAt(e.clientX,e.clientY)||hoverId}; });
+function beginPress(e){ if(e.button!==0)return; press={x:e.clientX,y:e.clientY,id:cellAt(e.clientX,e.clientY)||hoverId}; }
+pill.addEventListener('mousedown',beginPress);
+handle.addEventListener('mousedown',beginPress);
 document.addEventListener('mousemove',e=>{
   if(!press||dragging)return;
   if(Math.abs(e.clientY-press.y)>4||Math.abs(e.clientX-press.x)>4){
-    dragging=true; clearTimeout(hideTimer); hideCard();
-    invoke('drag_begin').catch(err=>{notice('drag_begin failed: '+err);dragging=false;});
+    dragging=true; root.dataset.drag='1'; clearTimeout(hideTimer); clearTimeout(dwellTimer); dwellTimer=null; hideCard();
+    invoke('drag_begin').catch(err=>{notice('drag_begin failed: '+err);dragging=false;root.dataset.drag='0';});
   }
 });
 document.addEventListener('mouseup',e=>{
   if(e.button!==0)return;
-  if(press&&!dragging) invoke('open_provider_page',{provider:press.id}).catch(()=>{});
+  if(press&&!dragging){
+    if(state!=='open') openNotch();
+    else invoke('open_provider_page',{provider:press.id}).catch(()=>{});
+  }
   press=null;
 });
-listen('drag_end',()=>{dragging=false;press=null;}).catch(()=>{});
+listen('drag_end',()=>{dragging=false;root.dataset.drag='0';press=null;}).catch(()=>{});
 
 function notice(msg){
   const n=document.getElementById('notice');
-  n.textContent=msg;n.classList.add('show');
+  n.textContent=String(msg||'');n.classList.add('show');
   clearTimeout(n._h);n._h=setTimeout(()=>n.classList.remove('show'),6000);
 }
 
@@ -400,7 +564,15 @@ listen('commandcode',e=>{ccSnap=e.payload||ccSnap;renderRing();if(card.classList
 invoke('get_commandcode').then(u=>{ccSnap=u||ccSnap;renderRing();}).catch(()=>{});
 listen('router9',e=>{r9Snap=e.payload||r9Snap;renderRing();if(card.classList.contains('show'))renderCard();}).catch(()=>{});
 invoke('get_router9').then(u=>{r9Snap=u||r9Snap;renderRing();}).catch(()=>{});
-function applyCfg(){ document.getElementById('root').style.opacity = (cfg.opacity!=null?cfg.opacity:1); }
+function applyCfg(){
+  root.style.opacity = (cfg.opacity!=null?cfg.opacity:1);
+  root.dataset.edge = cfg.edge||'right';
+  root.dataset.mode = cfg.drag_enabled?'free':'dock';
+  pill.dataset.cells=''; // the column/row swap changes the layout: rebuild the cells on the next render
+  fitZoom(); // the mode decides the design width, so re-measure now that it is known
+  renderRing();
+  if(card.classList.contains('show')) renderCard();
+}
 listen('config',e=>{cfg=e.payload||cfg;applyCfg();}).catch(()=>{});
 invoke('get_config').then(c=>{cfg=c||cfg;applyCfg();}).catch(()=>{});
 listen('glyphs',e=>{glyphs=e.payload||glyphs;renderRing();if(card.classList.contains('show'))renderCard();}).catch(()=>{});
@@ -410,7 +582,6 @@ invoke('get_glyphs').then(g=>{glyphs=g||glyphs;renderRing();}).catch(()=>{});
 invoke('get_codex').then(u=>{codexSnap=u||codexSnap;renderRing();}).catch(()=>{});
 invoke('get_usage').then(u=>{usage=u||usage;renderRing();}).catch(e=>notice('get_usage failed: '+e));
 invoke('get_state').then(s=>{stateSnap=s||stateSnap;renderRing();}).catch(()=>{});
-setInterval(renderRing,30_000); // stale state and reset copy move with time
 </script>
 </body>
 </html>

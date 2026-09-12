@@ -23,11 +23,36 @@ mod watcher;
 use std::sync::Mutex;
 use tauri::{AppHandle, Emitter, Manager};
 
-/// Logical size of the notch window: the 70 pt pill column on the right plus room for the hover card on the left.
+/// Logical size of the notch window when open on a side edge: the 70 pt pill column plus room for the hover card.
 pub const NOTCH_W: f64 = 340.0;
 /// Hand-bumped build tag, written to run.log at startup so a log can always be matched to the exe that wrote it.
-pub const BUILD: &str = "r31";
+pub const BUILD: &str = "r32";
 pub const NOTCH_H: f64 = 460.0; // 300 clipped the card once it held three window blocks plus the session list
+/// Open size in island form (top/bottom edge, or free-floating): cells run in a row, card sits under them.
+/// Wide enough for six cells (6×56 + 5×18 + padding = 466) plus room for the card to sit under an end cell.
+pub const ISLAND_W: f64 = 560.0;
+pub const ISLAND_H: f64 = 440.0;
+/// The island hangs from the top of its own window (16 px inset + ~52 px half-height), so this is
+/// where its centre sits. Free-floating placement anchors on that point, not the window centre, or
+/// the island would jump upwards the moment the window grew around the handle.
+const ISLAND_ANCHOR_Y: f64 = 68.0;
+/// Cell metrics, mirroring ui/notch.html: ring 56 + 6 gap + 18 label, stacked with a 14 gap inside 18 padding.
+/// Only the *height* of the open window follows the provider count — the width stays fixed so the page's
+/// design-width zoom correction (fitZoom) keeps a single number to compare against.
+const CELL_H: f64 = 80.0;
+const COL_GAP: f64 = 14.0;
+const CARD_H: f64 = 280.0;
+/// Closed size. The window shrinks to roughly the handle itself so the rest of the screen stays clickable —
+/// an always-on-top window swallows clicks over its transparent area, so "hidden" has to mean "small", not "invisible".
+pub const HANDLE_LONG: f64 = 132.0;
+pub const HANDLE_SHORT: f64 = 18.0;
+
+/// Open (true) or collapsed to the handle (false). The page drives this through `notch_expand`.
+static EXPANDED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+fn edge_is_horizontal(edge: &str) -> bool {
+    edge == "top" || edge == "bottom"
+}
 
 pub struct AppState {
     pub store: Mutex<state::Store>,
@@ -63,18 +88,67 @@ pub fn broadcast(app: &AppHandle) {
     let _ = app.emit("state", &snap);
 }
 
-/// Pins the notch to the right edge of the primary monitor, unless "move freely" is on, in which
-/// case it is sized the same way but placed at the saved bar_x/bar_y (anywhere on any monitor).
+/// Distance from the window's top to the island's own centre: the pill hangs from the top when open,
+/// and the handle fills the whole (tiny) window when closed.
+fn island_anchor_y(expanded: bool, wh: i32, notch_scale: f64) -> i32 {
+    if expanded {
+        (ISLAND_ANCHOR_Y * notch_scale).round() as i32
+    } else {
+        wh / 2
+    }
+}
+
+/// How many provider cells the pill will draw: Claude always has one, the rest only once they report
+/// something other than "absent" (same rule as `providers()` in the page).
+fn visible_providers(app: &AppHandle) -> usize {
+    let st = app.state::<AppState>();
+    let mut n = 1;
+    for m in [&st.codex, &st.cursor, &st.antigravity, &st.commandcode, &st.router9] {
+        if m.lock().map(|s| s.status != "absent").unwrap_or(false) {
+            n += 1;
+        }
+    }
+    n
+}
+
+/// Logical window size for the current mode: open or collapsed to the handle, docked on a side edge
+/// (tall) or lying along a top/bottom edge or floating free (wide island). A tall column has to fit
+/// every cell — six providers need ~586 px, well past the 460 the notch used when there were four.
+fn notch_size(edge: &str, free_move: bool, expanded: bool, notch_scale: f64, cells: usize) -> (f64, f64) {
+    let horizontal = free_move || edge_is_horizontal(edge);
+    let (w, h) = match (expanded, horizontal) {
+        (true, true) => (ISLAND_W, ISLAND_H),
+        (true, false) => {
+            let n = cells.max(1) as f64;
+            let pill_h = n * CELL_H + (n - 1.0) * COL_GAP + 36.0;
+            (NOTCH_W, pill_h.max(CARD_H) + 48.0)
+        }
+        (false, true) => (HANDLE_LONG, HANDLE_SHORT),
+        (false, false) => (HANDLE_SHORT, HANDLE_LONG),
+    };
+    (w * notch_scale, h * notch_scale)
+}
+
+/// Places the notch: docked against its edge (the pill's centre held at the saved ratio along that
+/// edge, so growing and shrinking never makes it wander), or free-floating around the saved centre.
 pub fn place_notch(app: &AppHandle) {
     let Some(w) = app.get_webview_window("notch") else {
         return;
     };
     let scale = w.scale_factor().unwrap_or(1.0);
-    let (free_move, free_pos, notch_scale) = {
+    let (free_move, free_centre, notch_scale, edge, ratio) = {
         let st = app.state::<AppState>();
         let c = st.cfg.lock().unwrap();
-        (c.drag_enabled, c.bar_x.zip(c.bar_y), c.scale.clamp(0.7, 1.6))
+        (
+            c.drag_enabled,
+            c.bar_x.zip(c.bar_y),
+            c.scale.clamp(0.7, 1.6),
+            c.edge.clone(),
+            c.notch_y.clamp(0.0, 1.0),
+        )
     };
+    let expanded = EXPANDED.load(std::sync::atomic::Ordering::Relaxed);
+    let cells = visible_providers(app);
     if let Ok(Some(mon)) = w.primary_monitor() {
         // Two monitors at different scales (150 % and 200 % in practice): the physical size can
         // end up converted with the *other* monitor's scale factor depending on where the window
@@ -82,7 +156,7 @@ pub fn place_notch(app: &AppHandle) {
         // So the physical size is pinned straight from mon.scale_factor() before placing the
         // window; if it still reports a different scale afterwards, it is pinned once more.
         let ms = mon.scale_factor();
-        let (nw, nh) = (NOTCH_W * notch_scale, NOTCH_H * notch_scale);
+        let (nw, nh) = notch_size(&edge, free_move, expanded, notch_scale, cells);
         let target = tauri::PhysicalSize::new((nw * ms).round() as u32, (nh * ms).round() as u32);
         let _ = w.set_size(target);
         // Position from the window's measured physical size — deriving it from the scale factor
@@ -91,30 +165,40 @@ pub fn place_notch(app: &AppHandle) {
             .outer_size()
             .map(|s| (s.width as i32, s.height as i32))
             .unwrap_or(((nw * scale) as i32, (nh * scale) as i32));
+        let (mx, my) = (mon.position().x, mon.position().y);
+        let (mw, mh) = (mon.size().width as i32, mon.size().height as i32);
         let (x, y) = if free_move {
-            if let Some((fx, fy)) = free_pos {
-                clamp_to_virtual_screen(fx, fy, ww, wh)
-            } else {
-                // First time free mode is on with nothing dragged yet: start at the current edge position
-                let x = mon.position().x + mon.size().width as i32 - ww;
-                (x, mon.position().y + (mon.size().height as i32 - wh) / 2)
-            }
+            let (cx, cy) = free_centre.unwrap_or((mx + mw - ww / 2, my + mh / 2));
+            let anchor = island_anchor_y(expanded, wh, notch_scale);
+            clamp_to_virtual_screen(cx - ww / 2, cy - anchor, ww, wh)
         } else {
-            let x = mon.position().x + mon.size().width as i32 - ww;
-            // Vertical position comes from the configured ratio (the pill can be dragged; it persists), clamped to the monitor
-            let ratio = {
-                let st = app.state::<AppState>();
-                let c = st.cfg.lock().unwrap();
-                c.notch_y.clamp(0.0, 1.0)
-            };
-            let mh = mon.size().height as i32;
-            let y = (mon.position().y as f64 + mh as f64 * ratio - wh as f64 / 2.0).round() as i32;
-            (x, y.clamp(mon.position().y, mon.position().y + (mh - wh).max(0)))
+            match edge.as_str() {
+                // Along the edge the centre comes from the saved ratio; across it the window is flush.
+                "left" => {
+                    let y = (my as f64 + mh as f64 * ratio - wh as f64 / 2.0).round() as i32;
+                    (mx, y.clamp(my, my + (mh - wh).max(0)))
+                }
+                "top" => {
+                    let x = (mx as f64 + mw as f64 * ratio - ww as f64 / 2.0).round() as i32;
+                    (x.clamp(mx, mx + (mw - ww).max(0)), my)
+                }
+                "bottom" => {
+                    let x = (mx as f64 + mw as f64 * ratio - ww as f64 / 2.0).round() as i32;
+                    (x.clamp(mx, mx + (mw - ww).max(0)), my + mh - wh)
+                }
+                _ => {
+                    let y = (my as f64 + mh as f64 * ratio - wh as f64 / 2.0).round() as i32;
+                    (mx + mw - ww, y.clamp(my, my + (mh - wh).max(0)))
+                }
+            }
         };
         let _ = w.set_position(tauri::PhysicalPosition::new(x, y));
         if w.outer_size().map(|s| s.width != target.width).unwrap_or(false) {
             let _ = w.set_size(target);
-            let x = if free_move { x } else { mon.position().x + mon.size().width as i32 - target.width as i32 };
+            let x = match (free_move, edge.as_str()) {
+                (false, "right") => mx + mw - target.width as i32,
+                _ => x,
+            };
             let _ = w.set_position(tauri::PhysicalPosition::new(x, y));
         }
         // Placement log line: the first thing to check when the notch is not visible
@@ -122,15 +206,21 @@ pub fn place_notch(app: &AppHandle) {
         let _ = std::fs::write(
             log,
             format!(
-                "notch placed build={BUILD}: pos=({x},{y}) size=({ww}x{wh}) inner={:?} win_scale={scale} mon_scale={ms} monitor=({},{} {}x{})\n",
+                "notch placed build={BUILD}: edge={edge} free={free_move} open={expanded} pos=({x},{y}) size=({ww}x{wh}) inner={:?} win_scale={scale} mon_scale={ms} monitor=({mx},{my} {mw}x{mh})\n",
                 w.inner_size().map(|s| (s.width, s.height)).unwrap_or((0, 0)),
-                mon.position().x,
-                mon.position().y,
-                mon.size().width,
-                mon.size().height
             ),
         );
     }
+}
+
+/// The page opens and closes the notch; the window itself follows so the collapsed handle does not
+/// swallow clicks meant for whatever is behind it.
+#[tauri::command]
+fn notch_expand(app: AppHandle, on: bool) {
+    if EXPANDED.swap(on, std::sync::atomic::Ordering::Relaxed) == on {
+        return;
+    }
+    place_notch(&app);
 }
 
 /// Keeps a free-floating drag inside the combined bounds of every attached monitor (not just the
@@ -163,9 +253,11 @@ pub fn reset_bar(app: &AppHandle) {
         c.notch_y = 0.5;
         c.bar_x = None;
         c.bar_y = None;
+        c.edge = "right".into();
         config::save(&c);
     }
     place_notch(app);
+    emit_config(app);
 }
 
 /// Drag along the right edge. The page calls this once after a press on the pill moves more than
@@ -206,68 +298,68 @@ fn drag_begin(app: AppHandle) {
         };
         let (ww, wh) = (size.width as i32, size.height as i32);
         let mut moved = false;
-
-        if free_move {
-            // Anywhere on any monitor, both axes follow the cursor 1:1 from the press point.
-            let mut last = (start_pos.x, start_pos.y);
-            loop {
-                if !left_button_down() {
-                    break;
-                }
-                if let Ok(cur) = app.cursor_position() {
-                    let nx = (start_pos.x as f64 + (cur.x - start_cur.x)).round() as i32;
-                    let ny = (start_pos.y as f64 + (cur.y - start_cur.y)).round() as i32;
-                    let (nx, ny) = clamp_to_virtual_screen(nx, ny, ww, wh);
-                    if (nx, ny) != last {
-                        last = (nx, ny);
-                        moved = true;
-                        let _ = w.set_position(tauri::PhysicalPosition::new(nx, ny));
-                    }
-                }
-                std::thread::sleep(std::time::Duration::from_millis(8));
+        // Both modes drag freely across every monitor; only the release differs — docked snaps to
+        // the nearest edge (AssistiveTouch), free keeps the island wherever it was let go.
+        let mut last = (start_pos.x, start_pos.y);
+        loop {
+            if !left_button_down() {
+                break;
             }
-            if moved {
+            if let Ok(cur) = app.cursor_position() {
+                let nx = (start_pos.x as f64 + (cur.x - start_cur.x)).round() as i32;
+                let ny = (start_pos.y as f64 + (cur.y - start_cur.y)).round() as i32;
+                let (nx, ny) = clamp_to_virtual_screen(nx, ny, ww, wh);
+                if (nx, ny) != last {
+                    last = (nx, ny);
+                    moved = true;
+                    let _ = w.set_position(tauri::PhysicalPosition::new(nx, ny));
+                }
+            }
+            std::thread::sleep(std::time::Duration::from_millis(8));
+        }
+        if moved {
+            let centre = (last.0 + ww / 2, last.1 + wh / 2);
+            if free_move {
+                // Saved against the island's own anchor point, matching how place_notch reads it back
+                let notch_scale = {
+                    let st = app.state::<AppState>();
+                    let c = st.cfg.lock().unwrap();
+                    c.scale.clamp(0.7, 1.6)
+                };
+                let anchor = island_anchor_y(EXPANDED.load(std::sync::atomic::Ordering::Relaxed), wh, notch_scale);
                 let st = app.state::<AppState>();
                 let mut c = st.cfg.lock().unwrap();
-                c.bar_x = Some(last.0);
-                c.bar_y = Some(last.1);
+                c.bar_x = Some(centre.0);
+                c.bar_y = Some(last.1 + anchor);
                 config::save(&c);
-                applog(&format!("notch drag (free): pos=({},{})", last.0, last.1));
-            }
-        } else {
-            // Original behaviour: welded to the right edge, vertical-only.
-            let Ok(Some(mon)) = w.primary_monitor() else {
-                DRAGGING.store(false, std::sync::atomic::Ordering::SeqCst);
-                let _ = app.emit("drag_end", false);
-                return;
-            };
-            let (my, mh) = (mon.position().y, mon.size().height as i32);
-            let lo = my;
-            let hi = my + (mh - wh).max(0);
-            let mut last_y = start_pos.y;
-            loop {
-                if !left_button_down() {
-                    break;
+                applog(&format!("notch drag (island): anchor=({},{})", centre.0, last.1 + anchor));
+            } else if let Ok(Some(mon)) = w.primary_monitor() {
+                let (mx, my) = (mon.position().x, mon.position().y);
+                let (mw, mh) = (mon.size().width as i32, mon.size().height as i32);
+                // Nearest edge by gap, then the centre's position along that edge becomes the ratio
+                let gaps = [
+                    ("left", centre.0 - mx),
+                    ("right", mx + mw - centre.0),
+                    ("top", centre.1 - my),
+                    ("bottom", my + mh - centre.1),
+                ];
+                let (edge, _) = gaps.iter().min_by_key(|(_, g)| *g).copied().unwrap_or(("right", 0));
+                let ratio = if edge_is_horizontal(edge) {
+                    (centre.0 - mx) as f64 / mw.max(1) as f64
+                } else {
+                    (centre.1 - my) as f64 / mh.max(1) as f64
+                };
+                {
+                    let st = app.state::<AppState>();
+                    let mut c = st.cfg.lock().unwrap();
+                    c.edge = edge.to_string();
+                    c.notch_y = ratio.clamp(0.0, 1.0);
+                    config::save(&c);
                 }
-                if let Ok(cur) = app.cursor_position() {
-                    let ny = (start_pos.y as f64 + (cur.y - start_cur.y)).round() as i32;
-                    let ny = ny.clamp(lo, hi);
-                    if ny != last_y {
-                        last_y = ny;
-                        moved = true;
-                        let _ = w.set_position(tauri::PhysicalPosition::new(start_pos.x, ny));
-                    }
-                }
-                std::thread::sleep(std::time::Duration::from_millis(8));
+                applog(&format!("notch drag: snapped to {edge} ratio={ratio:.3}"));
+                emit_config(&app);
             }
-            if moved {
-                let ratio = ((last_y + wh / 2 - my) as f64 / mh as f64).clamp(0.0, 1.0);
-                let st = app.state::<AppState>();
-                let mut c = st.cfg.lock().unwrap();
-                c.notch_y = ratio;
-                config::save(&c);
-                applog(&format!("notch drag: y={last_y} ratio={ratio:.3}"));
-            }
+            place_notch(&app); // settle into the snapped/clamped spot
         }
         DRAGGING.store(false, std::sync::atomic::Ordering::SeqCst);
         let _ = app.emit("drag_end", moved);
@@ -728,6 +820,7 @@ fn main() {
             get_commandcode,
             get_router9,
             get_config,
+            notch_expand,
             get_glyphs,
             get_activity,
             open_data_dir,
