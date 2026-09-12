@@ -82,14 +82,15 @@ fn persist(s: &UsageSnapshot) {
     }
 }
 
-/// Is there a 9Router to read — installed locally, or one named in the config (another machine)?
+/// Is there a 9Router to read — installed locally, or one set up in the API-keys window?
 pub fn present() -> bool {
-    let cfg = crate::config::load();
-    cfg.router9_url.is_some() || cfg.router9_token.is_some() || data_dir().map(|d| d.is_dir()).unwrap_or(false)
+    crate::config::load().router9_url.is_some()
+        || crate::secrets::get(crate::secrets::ROUTER9_TOKEN).is_some()
+        || data_dir().map(|d| d.is_dir()).unwrap_or(false)
 }
 
-/// Base URL of the 9Router to read; a remote one can be named in the config.
-fn base_url() -> String {
+/// Base URL of the 9Router to read; a remote one can be named in the API-keys window.
+pub fn base_url() -> String {
     crate::config::load()
         .router9_url
         .map(|u| u.trim().trim_end_matches('/').to_string())
@@ -97,16 +98,25 @@ fn base_url() -> String {
         .unwrap_or_else(|| format!("http://127.0.0.1:{}", port()))
 }
 
-/// The two files 9Router itself persists to authenticate its own CLI (shared/utils/machineId.js);
-/// both must exist for a token to be computable. A token set in the config wins — that is the only
-/// way to read a 9Router running on another machine, since the files are local to *that* machine.
-fn cli_token() -> Option<String> {
-    if let Some(t) = crate::config::load().router9_token {
-        let t = t.trim().to_string();
-        if !t.is_empty() {
-            return Some(t);
-        }
+/// Where the token in use comes from: pasted into the API-keys window, or computed from this PC's files
+pub fn token_source() -> Option<&'static str> {
+    if crate::secrets::get(crate::secrets::ROUTER9_TOKEN).is_some() {
+        Some("saved")
+    } else if local_token().is_some() {
+        Some("local")
+    } else {
+        None
     }
+}
+
+/// A pasted token wins — the only way to read a 9Router on another machine, whose files are local to it.
+fn cli_token() -> Option<String> {
+    crate::secrets::get(crate::secrets::ROUTER9_TOKEN).or_else(local_token)
+}
+
+/// The token this PC's own 9Router accepts, derived from the two files it persists to authenticate
+/// its CLI (shared/utils/machineId.js); both must exist for it to be computable.
+pub fn local_token() -> Option<String> {
     let dir = data_dir()?;
     let raw = std::fs::read_to_string(dir.join("machine-id")).ok()?.trim().to_string();
     let secret = std::fs::read_to_string(dir.join("auth").join("cli-secret")).ok()?.trim().to_string();
@@ -255,21 +265,35 @@ pub fn start(app: AppHandle) {
     });
 }
 
-/// For doctor: contains no secrets (the token itself is a derived hash, not printed)
+/// One read on demand, for the API-keys window's "Save & test"
+pub fn test() -> Result<String, String> {
+    let Some(token) = cli_token() else {
+        return Err("No CLI token — paste one, or open this PC's 9Router dashboard once".into());
+    };
+    match fetch_stats(&token) {
+        Ok(v) => {
+            let n = v.get("totalRequests").and_then(|x| x.as_i64()).unwrap_or(0);
+            Ok(format!("Connected to {} · {n} request{} today", base_url(), if n == 1 { "" } else { "s" }))
+        }
+        Err(FetchErr::NeedsAuth) => Err("9Router rejected this token".into()),
+        Err(FetchErr::RateLimited(s)) => Err(format!("9Router is rate limiting — retry in {s}s")),
+        Err(FetchErr::Other(e)) => Err(format!("Saved, but can't reach {} ({e})", base_url())),
+    }
+}
+
+/// For doctor: contains no secrets (the token itself is never printed)
 pub fn probe() -> String {
     let dir = data_dir();
     let dir_ok = dir.as_ref().map(|d| d.is_dir()).unwrap_or(false);
-    let from_config = crate::config::load().router9_token.is_some();
-    let token_ok = cli_token().is_some();
     format!(
         "9Router: url {} | data dir {} ({}), CLI token {}",
         base_url(),
         dir.map(|d| d.display().to_string()).unwrap_or_else(|| "?".into()),
         if dir_ok { "found" } else { "not found" },
-        match (token_ok, from_config) {
-            (true, true) => "set in config",
-            (true, false) => "computed from local files",
-            _ => "unavailable (9Router has not run here; set router9_token for a remote one)",
+        match token_source() {
+            Some("saved") => "saved in the API-keys window",
+            Some(_) => "computed from local files",
+            None => "unavailable (9Router has not run here; paste a token in the API-keys window for a remote one)",
         }
     )
 }

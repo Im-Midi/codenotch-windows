@@ -359,8 +359,11 @@ function renderCard(){
   let html=`<div class="c-head">${headIcon}<span class="c-title">${p.name} Usage</span></div>`;
   if(staleOf(snap)&&snap.fetched_at) html+=`<div class="c-sub">Updated ${ago(snap.fetched_at)}</div>`;
   if(snap.status==='needsAuth'){
-    const who={claude:'Sign in to Claude Code to see usage.',cursor:'Sign in to Cursor to see usage.',codex:'Sign in to Codex to see usage.',gemini:'Sign in to Antigravity to see usage.',commandcode:'Sign in to Command Code to see usage.',router9:'Start 9Router once on this machine to see usage.'}[p.id]||'';
+    const who={claude:'Sign in to Claude Code to see usage.',cursor:'Sign in to Cursor to see usage.',codex:'Sign in to Codex to see usage.',gemini:'Sign in to Antigravity to see usage.',commandcode:'Add a Command Code API key to see usage.',router9:'Connect 9Router to see usage.'}[p.id]||'';
     html+=`<div class="c-note">${who}<br>${snap.note||''}</div>`;
+    // The notch cannot take keyboard focus, so the key is typed in the API-keys window instead
+    if(p.id==='commandcode'||p.id==='router9')
+      html+=`<button onclick="invoke('open_settings')" style="margin-top:10px;font:600 12px 'Segoe UI',system-ui,sans-serif;background:#ececf0;color:#0b0b0d;border:0;border-radius:8px;padding:7px 12px;cursor:pointer">Add API key…</button>`;
   }else if(!snap.windows.length){
     html+=`<div class="c-note">${snap.note||'Waiting for first reading…'}</div>`;
   }else{

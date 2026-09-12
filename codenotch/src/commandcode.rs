@@ -68,26 +68,23 @@ fn persist(s: &UsageSnapshot) {
     }
 }
 
-/// Is Command Code present (a key configured anywhere, or the auth file on disk)? If not, no cell is shown.
+/// Is Command Code present (a key from any source, or the auth file on disk)? If not, no cell is shown.
 pub fn present() -> bool {
-    load_api_key().is_some() || auth_path().map(|p| p.is_file()).unwrap_or(false)
+    key_source().is_some() || auth_path().map(|p| p.is_file()).unwrap_or(false)
 }
 
-/// Key sources, in order: the env var the desktop harness uses, the key put in Codenotch's own
-/// config (so the usage can be read on a machine where Command Code is not installed), then the
-/// app's own auth.json.
-fn load_api_key() -> Option<String> {
+/// Key sources, in order: the env var the desktop harness uses, the key saved from Codenotch's
+/// API-keys window (Credential Manager — so usage can be read where Command Code is not
+/// installed), then the app's own auth.json. Returns which one answered, for the window's status.
+pub fn key_source() -> Option<(&'static str, String)> {
     if let Some(env) = std::env::var_os("COMMAND_CODE_API_KEY") {
         let s = env.to_string_lossy().trim().to_string();
         if !s.is_empty() {
-            return Some(s);
+            return Some(("env", s));
         }
     }
-    if let Some(k) = crate::config::load().commandcode_api_key {
-        let k = k.trim().to_string();
-        if !k.is_empty() {
-            return Some(k);
-        }
+    if let Some(k) = crate::secrets::get(crate::secrets::COMMANDCODE) {
+        return Some(("saved", k));
     }
     let text = std::fs::read_to_string(auth_path()?).ok()?;
     let v: serde_json::Value = serde_json::from_str(&text).ok()?;
@@ -95,7 +92,33 @@ fn load_api_key() -> Option<String> {
     if key.is_empty() {
         None
     } else {
-        Some(key)
+        Some(("auth.json", key))
+    }
+}
+
+fn load_api_key() -> Option<String> {
+    key_source().map(|(_, k)| k)
+}
+
+pub enum TestErr {
+    /// The server looked at the key and said no — it must not be stored
+    Rejected(String),
+    /// Could not be checked (offline, rate limited, server error) — says nothing about the key
+    Other(String),
+}
+
+/// Checks a key against `/alpha/whoami` and returns the account name it belongs to.
+pub fn test_key(key: &str) -> Result<String, TestErr> {
+    match get(WHOAMI, key) {
+        Ok(v) => Ok(v
+            .pointer("/user/userName")
+            .or_else(|| v.pointer("/user/name"))
+            .and_then(|x| x.as_str())
+            .unwrap_or("your account")
+            .to_string()),
+        Err(FetchErr::NeedsAuth) => Err(TestErr::Rejected("Command Code rejected this key — check it was copied in full".into())),
+        Err(FetchErr::RateLimited(s)) => Err(TestErr::Other(format!("rate limited, retrying in {s}s"))),
+        Err(FetchErr::Other(e)) => Err(TestErr::Other(e)),
     }
 }
 
@@ -346,4 +369,13 @@ pub fn probe() -> String {
         None => "auth.json not found".to_string(),
     };
     format!("Command Code: {auth}")
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    #[ignore = "calls api.commandcode.ai"]
+    fn bogus_key_is_rejected_not_merely_unverified() {
+        assert!(matches!(super::test_key("definitely-not-a-key"), Err(super::TestErr::Rejected(_))));
+    }
 }

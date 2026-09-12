@@ -15,6 +15,8 @@ mod cursor;
 mod antigravity;
 mod commandcode;
 mod router9;
+mod secrets;
+mod settings;
 mod glyphs;
 mod activity;
 mod diag;
@@ -819,6 +821,13 @@ fn main() {
             get_router9,
             get_config,
             notch_expand,
+            settings::open_settings,
+            settings::settings_status,
+            settings::save_commandcode_key,
+            settings::clear_commandcode_key,
+            settings::save_router9,
+            settings::router9_local_token,
+            settings::open_link,
             get_glyphs,
             get_activity,
             open_data_dir,

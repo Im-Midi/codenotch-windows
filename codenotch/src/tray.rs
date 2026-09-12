@@ -81,8 +81,10 @@ pub fn build_menu(app: &AppHandle, lang: &str) -> tauri::Result<Menu<Wry>> {
         scale_items.iter().map(|i| i as &dyn tauri::menu::IsMenuItem<Wry>).collect();
     let scale_menu = SubmenuBuilder::new(app, tr(lang, "size")).items(&scale_refs).build()?;
 
+    let keys = MenuItemBuilder::with_id("api-keys", tr(lang, "api_keys")).build(app)?;
     let quit = MenuItemBuilder::with_id("quit", tr(lang, "quit")).build(app)?;
     MenuBuilder::new(app)
+        .item(&keys)
         .items(&[&install, &uninstall])
         .separator()
         .item(&lang_menu)
@@ -115,6 +117,7 @@ fn handle(app: &AppHandle, id: &str) {
     match id {
         "install" => notice(app, hooks_install::install()),
         "uninstall" => notice(app, hooks_install::uninstall()),
+        "api-keys" => crate::settings::open(app),
         "reset" => crate::reset_bar(app),
         "open-data" => {
             let dir = crate::config::config_path().parent().map(|p| p.to_path_buf()).unwrap_or_default();
