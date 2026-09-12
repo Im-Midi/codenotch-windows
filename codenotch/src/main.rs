@@ -826,6 +826,7 @@ fn main() {
             settings::save_commandcode_key,
             settings::clear_commandcode_key,
             settings::save_router9,
+            settings::clear_router9,
             settings::router9_local_token,
             settings::open_link,
             get_glyphs,

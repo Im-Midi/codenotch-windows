@@ -1,7 +1,7 @@
 //! The API-keys window. The notch never takes focus (WS_EX_NOACTIVATE), so nothing can be typed
 //! into it; keys are entered here instead, in an ordinary focusable window opened from the tray.
 
-use crate::AppState;
+use crate::secrets;
 use serde::Serialize;
 use tauri::{AppHandle, Manager, WebviewUrl, WebviewWindowBuilder};
 
@@ -14,7 +14,7 @@ pub fn open(app: &AppHandle) {
     }
     let built = WebviewWindowBuilder::new(app, "settings", WebviewUrl::App("settings.html".into()))
         .title("Codenotch — API keys")
-        .inner_size(480.0, 640.0)
+        .inner_size(480.0, 700.0)
         .resizable(false)
         .center()
         .build();
@@ -36,6 +36,7 @@ pub struct Status {
     r9_url_custom: bool,
     r9_token_source: Option<String>,
     r9_local_available: bool,
+    r9_cf_access: bool,
 }
 
 /// Enough of the key to recognise it, never enough to use it
@@ -55,9 +56,10 @@ pub fn settings_status() -> Status {
         cc_source: cc.as_ref().map(|(s, _)| s.to_string()),
         cc_masked: cc.as_ref().map(|(_, k)| mask(k)),
         r9_url: crate::router9::base_url(),
-        r9_url_custom: crate::config::load().router9_url.is_some(),
+        r9_url_custom: secrets::get(secrets::ROUTER9_URL).is_some(),
         r9_token_source: crate::router9::token_source().map(String::from),
         r9_local_available: crate::router9::local_token().is_some(),
+        r9_cf_access: crate::router9::cf_access().is_some(),
     }
 }
 
@@ -66,10 +68,12 @@ pub struct Outcome {
     ok: bool,
     saved: bool,
     message: String,
+    /// The URL answered with a Cloudflare Access sign-in: the window opens the service-token fields
+    access_blocked: bool,
 }
 
 fn outcome(ok: bool, saved: bool, message: impl Into<String>) -> Outcome {
-    Outcome { ok, saved, message: message.into() }
+    Outcome { ok, saved, message: message.into(), access_blocked: false }
 }
 
 /// Tested against Command Code before it is kept: a key the server rejects is not stored at all,
@@ -80,7 +84,7 @@ pub fn save_commandcode_key(key: String) -> Outcome {
     if key.is_empty() {
         return outcome(false, false, "Paste a key first");
     }
-    let store = |msg: String, ok: bool| match crate::secrets::set(crate::secrets::COMMANDCODE, &key) {
+    let store = |msg: String, ok: bool| match secrets::set(secrets::COMMANDCODE, &key) {
         Ok(()) => {
             crate::commandcode::request_refresh();
             outcome(ok, true, msg)
@@ -96,7 +100,7 @@ pub fn save_commandcode_key(key: String) -> Outcome {
 
 #[tauri::command]
 pub fn clear_commandcode_key() {
-    crate::secrets::delete(crate::secrets::COMMANDCODE);
+    secrets::delete(secrets::COMMANDCODE);
     crate::commandcode::request_refresh();
 }
 
@@ -106,30 +110,53 @@ fn url_is_plain(u: &str) -> bool {
     u.chars().all(|c| c.is_ascii_alphanumeric() || ":/.-_~%?=[]".contains(c))
 }
 
+/// The URL field is filled with what is saved, so emptying it means "back to this PC's 9Router".
+/// Secret fields left empty keep what is already stored: the window clears them after every save,
+/// so "empty means delete" silently threw away a saved token the next time Save was pressed.
+/// Removing those is Reset's job.
 #[tauri::command]
-pub fn save_router9(app: AppHandle, url: String, token: String) -> Outcome {
+pub fn save_router9(url: String, token: String, cf_id: String, cf_secret: String) -> Outcome {
     let url = url.trim().trim_end_matches('/').to_string();
     if !url.is_empty() && !((url.starts_with("http://") || url.starts_with("https://")) && url_is_plain(&url)) {
         return outcome(false, false, "Enter a plain URL starting with http:// or https://");
     }
-    {
-        // Through the shared config, or the next drag or tray toggle would write the old value back
-        let st = app.state::<AppState>();
-        let mut c = st.cfg.lock().unwrap();
-        c.router9_url = if url.is_empty() { None } else { Some(url) };
-        crate::config::save(&c);
+    let (cf_id, cf_secret) = (cf_id.trim().to_string(), cf_secret.trim().to_string());
+    if cf_id.is_empty() != cf_secret.is_empty() {
+        return outcome(false, false, "A Cloudflare Access service token needs both the Client ID and the Client Secret");
     }
     let token = token.trim().to_string();
-    if token.is_empty() {
-        crate::secrets::delete(crate::secrets::ROUTER9_TOKEN);
-    } else if let Err(e) = crate::secrets::set(crate::secrets::ROUTER9_TOKEN, &token) {
-        return outcome(false, false, format!("Could not store the token: {e}"));
+    let mut writes: Vec<(&str, &str)> = Vec::new();
+    if url.is_empty() {
+        secrets::delete(secrets::ROUTER9_URL);
+    } else {
+        writes.push((secrets::ROUTER9_URL, &url));
+    }
+    if !token.is_empty() {
+        writes.push((secrets::ROUTER9_TOKEN, &token));
+    }
+    if !cf_id.is_empty() {
+        writes.push((secrets::ROUTER9_CF_ID, &cf_id));
+        writes.push((secrets::ROUTER9_CF_SECRET, &cf_secret));
+    }
+    for (target, value) in writes {
+        if let Err(e) = secrets::set(target, value) {
+            return outcome(false, false, format!("Could not store it: {e}"));
+        }
     }
     crate::router9::request_refresh();
     match crate::router9::test() {
         Ok(m) => outcome(true, true, m),
-        Err(m) => outcome(false, true, m),
+        Err(f) => Outcome { ok: false, saved: true, message: f.message, access_blocked: f.access_blocked },
     }
+}
+
+/// Reset: back to reading this PC's own 9Router, with nothing remote remembered
+#[tauri::command]
+pub fn clear_router9() {
+    for t in [secrets::ROUTER9_URL, secrets::ROUTER9_TOKEN, secrets::ROUTER9_CF_ID, secrets::ROUTER9_CF_SECRET] {
+        secrets::delete(t);
+    }
+    crate::router9::request_refresh();
 }
 
 /// This PC's own token, for pasting into Codenotch on another computer that should read this 9Router
@@ -145,6 +172,7 @@ pub fn open_link(which: String) {
     let url = match which.as_str() {
         "commandcode_keys" => "https://commandcode.ai/studio/".to_string(),
         "router9_dashboard" => format!("{}/dashboard", crate::router9::base_url()),
+        "cf_service_tokens" => "https://one.dash.cloudflare.com/".to_string(),
         _ => return,
     };
     if !url_is_plain(&url) {

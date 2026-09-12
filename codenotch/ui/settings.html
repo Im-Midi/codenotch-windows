@@ -24,7 +24,7 @@
     transition:background .25s,color .25s}
   .chip.ok{background:rgba(40,224,123,.12);color:var(--ok)}
   .desc{color:var(--mute);font-size:12px;margin:0 0 4px}
-  .current{font:12px ui-monospace,Consolas,monospace;color:var(--mute);margin-top:6px;min-height:0}
+  .current{font:12px ui-monospace,Consolas,monospace;color:var(--mute);margin-top:6px}
   label{display:block;font-size:11px;color:var(--mute);margin:12px 0 5px;text-transform:uppercase;letter-spacing:.4px}
   .field{display:flex;gap:6px}
   input{flex:1;min-width:0;background:#0d0d10;border:1px solid var(--line);color:var(--text);border-radius:9px;padding:9px 11px;
@@ -47,6 +47,15 @@
   .result.show{opacity:1;transform:none}
   .result.ok{color:var(--ok)}.result.bad{color:var(--bad)}.result.warn{color:var(--warn)}
   .note{font-size:11.5px;color:var(--mute);background:#101013;border:1px dashed var(--line);border-radius:9px;padding:8px 10px;margin:8px 0 0}
+  .saved-hint{font-size:11px;color:var(--ok);margin-left:6px;text-transform:none;letter-spacing:0}
+  details{margin-top:12px;border:1px solid var(--line);border-radius:10px;padding:0 12px;background:#101013;transition:border-color .2s}
+  details[open]{border-color:#34343c;padding-bottom:12px}
+  summary{cursor:pointer;list-style:none;padding:10px 0;font-size:12.5px;display:flex;align-items:center;gap:8px}
+  summary::-webkit-details-marker{display:none}
+  summary::before{content:"›";display:inline-block;transition:transform .3s var(--spring);color:var(--mute);font-size:15px;line-height:1}
+  details[open] summary::before{transform:rotate(90deg)}
+  details ol{margin:0 0 4px;padding-left:18px;color:var(--mute);font-size:12px}
+  details ol li{margin:3px 0}
   footer{color:#5c5c66;font-size:11px;text-align:center;margin-top:2px}
 </style>
 </head>
@@ -80,11 +89,29 @@
       Get it on the other computer with <i>Copy this PC's token</i> in Codenotch there.</p>
     <label for="r9Url">Server URL</label>
     <div class="field"><input id="r9Url" type="text" placeholder="http://127.0.0.1:20128" autocomplete="off" spellcheck="false"></div>
-    <label for="r9Token">CLI token</label>
+    <label for="r9Token">CLI token <span class="saved-hint" id="r9TokenHint" hidden>● saved — leave empty to keep it</span></label>
     <div class="field">
       <input id="r9Token" type="password" placeholder="Leave empty to use this PC's 9Router" autocomplete="off" spellcheck="false">
       <button class="icon ghost" id="r9Show" title="Show / hide">👁</button>
     </div>
+
+    <details id="cfBox">
+      <summary>Behind Cloudflare Access? <span class="saved-hint" id="cfHint" hidden>● service token saved</span></summary>
+      <ol>
+        <li>In Cloudflare Zero Trust open <b>Access controls → Service credentials → Service Tokens</b> and create one.</li>
+        <li>On the 9Router application add a policy with action <b>Service Auth</b> that includes that token.</li>
+        <li>Paste its Client ID and Client Secret here.</li>
+      </ol>
+      <label for="cfId">Client ID</label>
+      <div class="field"><input id="cfId" type="text" placeholder="…​.access" autocomplete="off" spellcheck="false"></div>
+      <label for="cfSecret">Client Secret</label>
+      <div class="field">
+        <input id="cfSecret" type="password" placeholder="cfast_…" autocomplete="off" spellcheck="false">
+        <button class="icon ghost" id="cfShow" title="Show / hide">👁</button>
+      </div>
+      <div class="row"><button class="ghost" id="cfOpen">Open Zero Trust ↗</button></div>
+    </details>
+
     <div class="row">
       <button class="ghost" id="r9Copy" hidden>Copy this PC's token</button>
       <button class="ghost" id="r9Dash">Dashboard ↗</button>
@@ -117,14 +144,21 @@ async function refresh(){
   $('r9Chip').textContent = r9Label || 'Not connected';
   $('r9Chip').className = 'chip' + (s.r9_token_source ? ' ok' : '');
   $('r9Copy').hidden = !s.r9_local_available;
-  if(first && s.r9_url_custom) $('r9Url').value = s.r9_url; // never overwrite what is being typed
+  $('r9TokenHint').hidden = s.r9_token_source !== 'saved';
+  $('cfHint').hidden = !s.r9_cf_access;
+  if(first){
+    if(s.r9_url_custom) $('r9Url').value = s.r9_url; // never overwrite what is being typed
+    if(s.r9_cf_access) $('cfBox').open = true;
+  }
   first = false;
 }
 
 $('ccShow').onclick = () => toggle($('ccKey'));
 $('r9Show').onclick = () => toggle($('r9Token'));
+$('cfShow').onclick = () => toggle($('cfSecret'));
 $('ccGet').onclick = () => invoke('open_link', {which:'commandcode_keys'});
 $('r9Dash').onclick = () => invoke('open_link', {which:'router9_dashboard'});
+$('cfOpen').onclick = () => invoke('open_link', {which:'cf_service_tokens'});
 
 async function saveCc(){
   const btn = $('ccSave'), key = $('ccKey').value;
@@ -143,19 +177,25 @@ $('ccRemove').onclick = async () => {
   say($('ccResult'), 'warn', 'Key removed.'); refresh();
 };
 
-async function saveR9(url, token){
+async function saveR9(){
   const btn = $('r9Save');
   busy(btn, true, 'Checking…'); say($('r9Result'), 'warn', 'Reaching 9Router…');
   try {
-    const r = await invoke('save_router9', {url, token});
+    const r = await invoke('save_router9', {
+      url: $('r9Url').value, token: $('r9Token').value, cfId: $('cfId').value, cfSecret: $('cfSecret').value });
     say($('r9Result'), r.ok ? 'ok' : (r.saved ? 'warn' : 'bad'), r.message);
-    if(r.saved) $('r9Token').value = '';
+    if(r.saved){ $('r9Token').value = ''; $('cfId').value = ''; $('cfSecret').value = ''; }
+    if(r.access_blocked){ $('cfBox').open = true; $('cfId').focus(); }
   } catch(e){ say($('r9Result'), 'bad', String(e)); }
   busy(btn, false, 'Save & test'); refresh();
 }
-$('r9Save').onclick = () => saveR9($('r9Url').value, $('r9Token').value);
-$('r9Token').addEventListener('keydown', e => { if(e.key === 'Enter') $('r9Save').click(); });
-$('r9Reset').onclick = () => { $('r9Url').value = ''; $('r9Token').value = ''; saveR9('', ''); };
+$('r9Save').onclick = saveR9;
+for(const id of ['r9Token','cfSecret']) $(id).addEventListener('keydown', e => { if(e.key === 'Enter') saveR9(); });
+$('r9Reset').onclick = async () => {
+  for(const id of ['r9Url','r9Token','cfId','cfSecret']) $(id).value = '';
+  await invoke('clear_router9');
+  say($('r9Result'), 'warn', "Reset — reading this PC's own 9Router again."); refresh();
+};
 $('r9Copy').onclick = async () => {
   const t = await invoke('router9_local_token');
   if(!t){ say($('r9Result'), 'bad', "This PC's 9Router has not created its token yet — open its dashboard once."); return; }

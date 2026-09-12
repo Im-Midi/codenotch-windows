@@ -4,6 +4,13 @@
 
 pub const COMMANDCODE: &str = "codenotch:commandcode";
 pub const ROUTER9_TOKEN: &str = "codenotch:router9-token";
+/// Not a secret, but kept beside its token rather than in config.json: that file is rewritten whole
+/// from each process's in-memory copy (drag, tray toggles, language), and a URL saved from the
+/// API-keys window was found written back over with a stale null while its token survived here.
+pub const ROUTER9_URL: &str = "codenotch:router9-url";
+/// Cloudflare Access service token, for a 9Router published behind Access (Zero Trust)
+pub const ROUTER9_CF_ID: &str = "codenotch:router9-cf-access-id";
+pub const ROUTER9_CF_SECRET: &str = "codenotch:router9-cf-access-secret";
 
 fn wide(s: &str) -> Vec<u16> {
     s.encode_utf16().chain(std::iter::once(0)).collect()

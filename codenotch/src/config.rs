@@ -35,11 +35,6 @@ pub struct Config {
     /// Notch size multiplier, 0.7-1.6 (tray submenu)
     #[serde(default = "default_scale")]
     pub scale: f64,
-    /// Base URL of the 9Router to read, e.g. "http://192.168.1.20:20128" for one running on another
-    /// machine. Defaults to http://127.0.0.1:20128. Set from the API-keys window; the keys and
-    /// tokens entered there are secrets and live in Credential Manager (secrets.rs), not here.
-    #[serde(default)]
-    pub router9_url: Option<String>,
 }
 
 fn default_notch_y() -> f64 {
@@ -75,7 +70,6 @@ impl Default for Config {
             edge: default_edge(),
             opacity: default_opacity(),
             scale: default_scale(),
-            router9_url: None,
         }
     }
 }
