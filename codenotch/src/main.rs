@@ -13,6 +13,8 @@ mod usage;
 mod codex;
 mod cursor;
 mod antigravity;
+mod commandcode;
+mod router9;
 mod glyphs;
 mod activity;
 mod diag;
@@ -35,6 +37,8 @@ pub struct AppState {
     pub codex: Mutex<usage::UsageSnapshot>,
     pub cursor: Mutex<usage::UsageSnapshot>,
     pub antigravity: Mutex<usage::UsageSnapshot>,
+    pub commandcode: Mutex<usage::UsageSnapshot>,
+    pub router9: Mutex<usage::UsageSnapshot>,
     /// Provider glyph cache, collected at launch and again on a tray refresh
     pub glyphs: Mutex<std::collections::HashMap<String, glyphs::Glyph>>,
     /// Working state of the non-Claude providers (Cursor reports it; Codex and Antigravity are inferred from recent writes)
@@ -260,11 +264,23 @@ fn refresh_usage(app: AppHandle) {
     codex::request_refresh();
     cursor::request_refresh();
     antigravity::request_refresh();
+    commandcode::request_refresh();
+    router9::request_refresh();
 }
 
 #[tauri::command]
 fn get_antigravity(state: tauri::State<AppState>) -> usage::UsageSnapshot {
     state.antigravity.lock().unwrap().clone()
+}
+
+#[tauri::command]
+fn get_commandcode(state: tauri::State<AppState>) -> usage::UsageSnapshot {
+    state.commandcode.lock().unwrap().clone()
+}
+
+#[tauri::command]
+fn get_router9(state: tauri::State<AppState>) -> usage::UsageSnapshot {
+    state.router9.lock().unwrap().clone()
 }
 
 #[tauri::command]
@@ -316,6 +332,8 @@ fn open_provider_page(provider: String) {
         "codex" => "https://chatgpt.com/#settings/Account",
         "cursor" => "https://cursor.com/dashboard",
         "gemini" => "https://antigravity.google",
+        "commandcode" => "https://commandcode.ai",
+        "router9" => "http://127.0.0.1:20128/dashboard",
         _ => "https://claude.ai/settings/usage",
     };
     let mut cmd = std::process::Command::new("cmd");
@@ -600,6 +618,8 @@ fn main() {
             codex: Mutex::new(codex::load_persisted()),
             cursor: Mutex::new(cursor::load_persisted()),
             antigravity: Mutex::new(antigravity::load_persisted()),
+            commandcode: Mutex::new(commandcode::load_persisted()),
+            router9: Mutex::new(router9::load_persisted()),
             glyphs: Mutex::new(Default::default()),
             activity: Mutex::new(Vec::new()),
         })
@@ -609,6 +629,8 @@ fn main() {
             get_codex,
             get_cursor,
             get_antigravity,
+            get_commandcode,
+            get_router9,
             get_glyphs,
             get_activity,
             open_data_dir,
@@ -637,6 +659,8 @@ fn main() {
             codex::start(handle.clone());
             cursor::start(handle.clone());
             antigravity::start(handle.clone());
+            commandcode::start(handle.clone());
+            router9::start(handle.clone());
             activity::start(handle.clone());
             // Collecting glyphs may read icon resources out of a few executables; do it off the main thread and push when done
             let gh = handle.clone();
