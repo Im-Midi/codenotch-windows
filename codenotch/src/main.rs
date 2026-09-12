@@ -201,15 +201,13 @@ pub fn place_notch(app: &AppHandle) {
             };
             let _ = w.set_position(tauri::PhysicalPosition::new(x, y));
         }
-        // Placement log line: the first thing to check when the notch is not visible
-        let log = config::config_path().with_file_name("run.log");
-        let _ = std::fs::write(
-            log,
-            format!(
-                "notch placed build={BUILD}: edge={edge} free={free_move} open={expanded} pos=({x},{y}) size=({ww}x{wh}) inner={:?} win_scale={scale} mon_scale={ms} monitor=({mx},{my} {mw}x{mh})\n",
-                w.inner_size().map(|s| (s.width, s.height)).unwrap_or((0, 0)),
-            ),
-        );
+        // Placement log line: the first thing to check when the notch is not visible.
+        // Appended, never rewritten — this used to truncate run.log, and now that the notch is placed
+        // on every open and close it would wipe every other provider's diagnostics within seconds.
+        applog(&format!(
+            "notch placed build={BUILD}: edge={edge} free={free_move} open={expanded} pos=({x},{y}) size=({ww}x{wh}) inner={:?} win_scale={scale} mon_scale={ms} monitor=({mx},{my} {mw}x{mh})",
+            w.inner_size().map(|s| (s.width, s.height)).unwrap_or((0, 0)),
+        ));
     }
 }
 

@@ -82,14 +82,31 @@ fn persist(s: &UsageSnapshot) {
     }
 }
 
-/// Is 9Router installed (its data dir has ever been created)? If not, no cell is shown.
+/// Is there a 9Router to read — installed locally, or one named in the config (another machine)?
 pub fn present() -> bool {
-    data_dir().map(|d| d.is_dir()).unwrap_or(false)
+    let cfg = crate::config::load();
+    cfg.router9_url.is_some() || cfg.router9_token.is_some() || data_dir().map(|d| d.is_dir()).unwrap_or(false)
+}
+
+/// Base URL of the 9Router to read; a remote one can be named in the config.
+fn base_url() -> String {
+    crate::config::load()
+        .router9_url
+        .map(|u| u.trim().trim_end_matches('/').to_string())
+        .filter(|u| !u.is_empty())
+        .unwrap_or_else(|| format!("http://127.0.0.1:{}", port()))
 }
 
 /// The two files 9Router itself persists to authenticate its own CLI (shared/utils/machineId.js);
-/// both must exist for a token to be computable.
+/// both must exist for a token to be computable. A token set in the config wins — that is the only
+/// way to read a 9Router running on another machine, since the files are local to *that* machine.
 fn cli_token() -> Option<String> {
+    if let Some(t) = crate::config::load().router9_token {
+        let t = t.trim().to_string();
+        if !t.is_empty() {
+            return Some(t);
+        }
+    }
     let dir = data_dir()?;
     let raw = std::fs::read_to_string(dir.join("machine-id")).ok()?.trim().to_string();
     let secret = std::fs::read_to_string(dir.join("auth").join("cli-secret")).ok()?.trim().to_string();
@@ -113,7 +130,7 @@ enum FetchErr {
 }
 
 fn fetch_stats(token: &str) -> Result<serde_json::Value, FetchErr> {
-    let url = format!("http://127.0.0.1:{}/api/usage/stats?period=today", port());
+    let url = format!("{}/api/usage/stats?period=today", base_url());
     let resp = ureq::get(&url)
         .set("x-9r-cli-token", token)
         .set("Accept", "application/json")
@@ -190,7 +207,7 @@ fn read_once() -> UsageSnapshot {
         Err(FetchErr::Other(msg)) => {
             // Most common cause: 9Router installed but its server is not currently running
             snap.status = "none".into();
-            snap.note = format!("9Router not reachable on 127.0.0.1:{} ({msg})", port());
+            snap.note = format!("9Router not reachable at {} ({msg})", base_url());
             snap
         }
     }
@@ -242,11 +259,17 @@ pub fn start(app: AppHandle) {
 pub fn probe() -> String {
     let dir = data_dir();
     let dir_ok = dir.as_ref().map(|d| d.is_dir()).unwrap_or(false);
+    let from_config = crate::config::load().router9_token.is_some();
     let token_ok = cli_token().is_some();
     format!(
-        "9Router: data dir {} ({}), CLI token {}",
+        "9Router: url {} | data dir {} ({}), CLI token {}",
+        base_url(),
         dir.map(|d| d.display().to_string()).unwrap_or_else(|| "?".into()),
         if dir_ok { "found" } else { "not found" },
-        if token_ok { "computable" } else { "unavailable (machine-id/cli-secret missing)" }
+        match (token_ok, from_config) {
+            (true, true) => "set in config",
+            (true, false) => "computed from local files",
+            _ => "unavailable (9Router has not run here; set router9_token for a remote one)",
+        }
     )
 }

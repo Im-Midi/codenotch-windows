@@ -35,6 +35,20 @@ pub struct Config {
     /// Notch size multiplier, 0.7-1.6 (tray submenu)
     #[serde(default = "default_scale")]
     pub scale: f64,
+    /// Command Code API key, for when the desktop app is not installed on this machine (it would
+    /// otherwise be read from ~/.commandcode/auth.json). COMMAND_CODE_API_KEY still wins over it.
+    #[serde(default)]
+    pub commandcode_api_key: Option<String>,
+    /// Base URL of the 9Router to read, e.g. "http://192.168.1.20:20128" for one running on another
+    /// machine. Defaults to http://127.0.0.1:20128.
+    #[serde(default)]
+    pub router9_url: Option<String>,
+    /// 9Router CLI token, for a 9Router that is not on this machine. Its usage API does **not**
+    /// accept the API keys issued for the LLM proxy (see router9.rs), so this is the machine token
+    /// 9Router derives from its own data dir — copy the value the local install would compute, or
+    /// the machine-id/cli-secret pair it is built from. Left unset, it is computed from local files.
+    #[serde(default)]
+    pub router9_token: Option<String>,
 }
 
 fn default_notch_y() -> f64 {
@@ -70,6 +84,9 @@ impl Default for Config {
             edge: default_edge(),
             opacity: default_opacity(),
             scale: default_scale(),
+            commandcode_api_key: None,
+            router9_url: None,
+            router9_token: None,
         }
     }
 }

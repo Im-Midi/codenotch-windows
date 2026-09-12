@@ -68,17 +68,25 @@ fn persist(s: &UsageSnapshot) {
     }
 }
 
-/// Is Command Code present (auth file on disk, or the env override set)? If not, no cell is shown.
+/// Is Command Code present (a key configured anywhere, or the auth file on disk)? If not, no cell is shown.
 pub fn present() -> bool {
-    std::env::var_os("COMMAND_CODE_API_KEY").is_some()
-        || auth_path().map(|p| p.is_file()).unwrap_or(false)
+    load_api_key().is_some() || auth_path().map(|p| p.is_file()).unwrap_or(false)
 }
 
+/// Key sources, in order: the env var the desktop harness uses, the key put in Codenotch's own
+/// config (so the usage can be read on a machine where Command Code is not installed), then the
+/// app's own auth.json.
 fn load_api_key() -> Option<String> {
     if let Some(env) = std::env::var_os("COMMAND_CODE_API_KEY") {
         let s = env.to_string_lossy().trim().to_string();
         if !s.is_empty() {
             return Some(s);
+        }
+    }
+    if let Some(k) = crate::config::load().commandcode_api_key {
+        let k = k.trim().to_string();
+        if !k.is_empty() {
+            return Some(k);
         }
     }
     let text = std::fs::read_to_string(auth_path()?).ok()?;

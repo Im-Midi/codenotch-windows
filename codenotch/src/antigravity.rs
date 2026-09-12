@@ -588,7 +588,18 @@ pub fn start(app: AppHandle) {
                 }
             }
         }
-        let mut rt = Runtime { endpoint: None, ever_bridged: false };
+        // Seeded from the restored reading, not just from this process's own luck: ever_bridged used
+        // to start false on every launch, so a cold start while Antigravity happened to be closed
+        // (the common case — Codenotch autostarts with Windows, long before the editor is opened)
+        // skipped the "keep the last percentages" branch below and degraded a perfectly good stored
+        // reading into "~0 requests today". Only the bridge and Google produce metered windows, so a
+        // restored window with a percentage is proof the bridge has answered before.
+        let bridged_before = {
+            let st = app.state::<AppState>();
+            let s = st.antigravity.lock().unwrap();
+            s.windows.iter().any(|w| w.count.is_none())
+        };
+        let mut rt = Runtime { endpoint: None, ever_bridged: bridged_before };
         loop {
             let prev = {
                 let st = app.state::<AppState>();
