@@ -8,23 +8,79 @@ pub struct Config {
     /// "auto" | "zh" | "en" | "ja" | "ko"
     #[serde(default = "default_lang")]
     pub lang: String,
+    /// Free-floating position (physical px, window **centre**), set after a drag while drag_enabled
+    /// is true. Centre rather than top-left so the island keeps its place when it grows or shrinks.
     #[serde(default)]
     pub bar_x: Option<i32>,
     #[serde(default)]
     pub bar_y: Option<i32>,
-    /// Logical width of the bar (wheel-adjustable, 220-520); None = default 360
+    /// Which screen edge the notch is docked to: "right" | "left" | "top" | "bottom".
+    /// A drag releases onto the nearest edge (AssistiveTouch-style), unless drag_enabled is on.
+    #[serde(default = "default_edge")]
+    pub edge: String,
+    /// Logical width of the bar (wheel-adjustable, 220-520); None = default 360. Unused for now — reserved for a future free-floating layout.
     #[serde(default)]
     pub bar_w: Option<u32>,
-    /// Allow dragging + wheel resizing (tray toggle, off by default to prevent accidental drags)
+    /// "Move freely" (tray toggle, off by default to prevent accidental drags): true = unpinned
+    /// from the right edge, dragged anywhere on screen and placed at bar_x/bar_y; false = the
+    /// original edge notch, vertical-only drag along notch_y.
     #[serde(default)]
     pub drag_enabled: bool,
     /// Vertical position of the notch: the window centre as a fraction of the primary monitor's height (0 = top, 1 = bottom), default 0.5; saved after a drag
     #[serde(default = "default_notch_y")]
     pub notch_y: f64,
+    /// Window opacity, 0.15-1.0 (tray submenu)
+    #[serde(default = "default_opacity")]
+    pub opacity: f64,
+    /// Notch size multiplier, 0.7-1.6 (tray submenu)
+    #[serde(default = "default_scale")]
+    pub scale: f64,
+    /// While the notch is closed, grow the handle into a small pill showing what is working (tray toggle)
+    #[serde(default = "default_true")]
+    pub live_activity: bool,
+    /// Quota percentages that trigger an island alert when crossed; empty = alerts off (tray submenu)
+    #[serde(default = "default_alert_levels")]
+    pub alert_levels: Vec<u32>,
+    /// Closed and idle, show a two-sided island instead of the bare handle: the tightest quota on the
+    /// left, the next reset on the right (tray toggle)
+    #[serde(default)]
+    pub compact: bool,
+    /// Hide the notch while a full-screen app, game or presentation is in front (tray toggle)
+    #[serde(default = "default_true")]
+    pub hide_fullscreen: bool,
+    /// "dark" | "graphite" | "glass"
+    #[serde(default = "default_theme")]
+    pub theme: String,
+    /// Provider ids in the order the pill shows them; ids not listed keep their built-in order after these
+    #[serde(default)]
+    pub provider_order: Vec<String>,
+    /// Provider ids the pill leaves out
+    #[serde(default)]
+    pub hidden_providers: Vec<String>,
+}
+
+fn default_theme() -> String {
+    "dark".into()
+}
+
+fn default_true() -> bool {
+    true
+}
+fn default_alert_levels() -> Vec<u32> {
+    vec![80, 95]
 }
 
 fn default_notch_y() -> f64 {
     0.5
+}
+fn default_edge() -> String {
+    "right".into()
+}
+fn default_opacity() -> f64 {
+    1.0
+}
+fn default_scale() -> f64 {
+    1.0
 }
 
 fn default_port() -> u16 {
@@ -44,6 +100,16 @@ impl Default for Config {
             bar_w: None,
             drag_enabled: false,
             notch_y: default_notch_y(),
+            edge: default_edge(),
+            opacity: default_opacity(),
+            scale: default_scale(),
+            live_activity: true,
+            alert_levels: default_alert_levels(),
+            compact: false,
+            hide_fullscreen: true,
+            theme: default_theme(),
+            provider_order: Vec::new(),
+            hidden_providers: Vec::new(),
         }
     }
 }

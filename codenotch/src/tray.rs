@@ -22,6 +22,13 @@ pub fn setup(app: &AppHandle) -> tauri::Result<()> {
     Ok(())
 }
 
+/// Tray "Quota alerts" choices: menu id, label key, the percentages that alert
+const ALERT_PRESETS: [(&str, &str, &[u32]); 3] = [
+    ("alerts-off", "alerts_off", &[]),
+    ("alerts-high", "alerts_high", &[80, 95]),
+    ("alerts-all", "alerts_all", &[50, 80, 95]),
+];
+
 pub fn build_menu(app: &AppHandle, lang: &str) -> tauri::Result<Menu<Wry>> {
     let install = MenuItemBuilder::with_id("install", tr(lang, "install")).build(app)?;
     let uninstall = MenuItemBuilder::with_id("uninstall", tr(lang, "uninstall")).build(app)?;
@@ -49,13 +56,95 @@ pub fn build_menu(app: &AppHandle, lang: &str) -> tauri::Result<Menu<Wry>> {
     let auto = CheckMenuItemBuilder::with_id("autostart", tr(lang, "autostart"))
         .checked(crate::autostart::is_enabled())
         .build(app)?;
+
+    let (free_move, opacity, notch_scale, live, levels, compact, hide_fs, theme) = {
+        let st = app.state::<crate::AppState>();
+        let c = st.cfg.lock().unwrap();
+        (c.drag_enabled, c.opacity, c.scale, c.live_activity, c.alert_levels.clone(), c.compact, c.hide_fullscreen, c.theme.clone())
+    };
+    // Which build is running, at a glance: installers of different rounds otherwise look identical
+    let version = MenuItemBuilder::with_id("version", format!("Codenotch v{} ({}) · Created by penyu101", env!("CARGO_PKG_VERSION"), crate::BUILD))
+        .enabled(false)
+        .build(app)?;
+    let hide_fs_item = CheckMenuItemBuilder::with_id("hide-fullscreen", tr(lang, "hide_fullscreen"))
+        .checked(hide_fs)
+        .build(app)?;
+    let theme_items: Vec<_> = ["dark", "graphite", "glass"]
+        .iter()
+        .map(|t| {
+            let key = match *t {
+                "graphite" => "theme_graphite",
+                "glass" => "theme_glass",
+                _ => "theme_dark",
+            };
+            CheckMenuItemBuilder::with_id(format!("theme-{t}"), tr(lang, key)).checked(theme == *t).build(app)
+        })
+        .collect::<tauri::Result<_>>()?;
+    let theme_refs: Vec<&dyn tauri::menu::IsMenuItem<Wry>> =
+        theme_items.iter().map(|i| i as &dyn tauri::menu::IsMenuItem<Wry>).collect();
+    let theme_menu = SubmenuBuilder::new(app, tr(lang, "theme")).items(&theme_refs).build()?;
+    let layout = MenuItemBuilder::with_id("layout", tr(lang, "layout")).build(app)?;
+    let compact_item = CheckMenuItemBuilder::with_id("compact", tr(lang, "compact"))
+        .checked(compact)
+        .build(app)?;
+    let free = CheckMenuItemBuilder::with_id("free-move", tr(lang, "free_move"))
+        .checked(free_move)
+        .build(app)?;
+    let live_item = CheckMenuItemBuilder::with_id("live-activity", tr(lang, "live_activity"))
+        .checked(live)
+        .build(app)?;
+    let alert_items: Vec<_> = ALERT_PRESETS
+        .iter()
+        .map(|(id, key, set)| {
+            CheckMenuItemBuilder::with_id(*id, tr(lang, key)).checked(levels.as_slice() == *set).build(app)
+        })
+        .collect::<tauri::Result<_>>()?;
+    let alert_refs: Vec<&dyn tauri::menu::IsMenuItem<Wry>> =
+        alert_items.iter().map(|i| i as &dyn tauri::menu::IsMenuItem<Wry>).collect();
+    let alerts_menu = SubmenuBuilder::new(app, tr(lang, "alerts")).items(&alert_refs).build()?;
+    let opacity_items: Vec<_> = [100u32, 85, 70, 55, 40]
+        .iter()
+        .map(|pct| {
+            CheckMenuItemBuilder::with_id(format!("opacity-{pct}"), format!("{pct}%"))
+                .checked((opacity * 100.0).round() as u32 == *pct)
+                .build(app)
+        })
+        .collect::<tauri::Result<_>>()?;
+    let opacity_refs: Vec<&dyn tauri::menu::IsMenuItem<Wry>> =
+        opacity_items.iter().map(|i| i as &dyn tauri::menu::IsMenuItem<Wry>).collect();
+    let opacity_menu = SubmenuBuilder::new(app, tr(lang, "opacity")).items(&opacity_refs).build()?;
+    let scale_items: Vec<_> = [80u32, 100, 125, 150]
+        .iter()
+        .map(|pct| {
+            CheckMenuItemBuilder::with_id(format!("scale-{pct}"), format!("{pct}%"))
+                .checked((notch_scale * 100.0).round() as u32 == *pct)
+                .build(app)
+        })
+        .collect::<tauri::Result<_>>()?;
+    let scale_refs: Vec<&dyn tauri::menu::IsMenuItem<Wry>> =
+        scale_items.iter().map(|i| i as &dyn tauri::menu::IsMenuItem<Wry>).collect();
+    let scale_menu = SubmenuBuilder::new(app, tr(lang, "size")).items(&scale_refs).build()?;
+
+    let keys = MenuItemBuilder::with_id("api-keys", tr(lang, "api_keys")).build(app)?;
     let quit = MenuItemBuilder::with_id("quit", tr(lang, "quit")).build(app)?;
     MenuBuilder::new(app)
+        .item(&version)
+        .separator()
+        .item(&keys)
+        .item(&layout)
         .items(&[&install, &uninstall])
         .separator()
         .item(&lang_menu)
         .item(&refresh)
         .item(&reset)
+        .item(&free)
+        .item(&live_item)
+        .item(&compact_item)
+        .item(&alerts_menu)
+        .item(&hide_fs_item)
+        .item(&theme_menu)
+        .item(&opacity_menu)
+        .item(&scale_menu)
         .item(&open_data)
         .item(&auto)
         .separator()
@@ -80,6 +169,26 @@ fn handle(app: &AppHandle, id: &str) {
     match id {
         "install" => notice(app, hooks_install::install()),
         "uninstall" => notice(app, hooks_install::uninstall()),
+        "api-keys" | "layout" => crate::settings::open(app), // the layout card sits at the top of that window
+        "hide-fullscreen" => {
+            {
+                let st = app.state::<crate::AppState>();
+                let mut c = st.cfg.lock().unwrap();
+                c.hide_fullscreen = !c.hide_fullscreen;
+                crate::config::save(&c);
+            }
+            refresh_menu(app);
+        }
+        _ if id.starts_with("theme-") => {
+            {
+                let st = app.state::<crate::AppState>();
+                let mut c = st.cfg.lock().unwrap();
+                c.theme = id[6..].to_string();
+                crate::config::save(&c);
+            }
+            crate::emit_config(app);
+            refresh_menu(app);
+        }
         "reset" => crate::reset_bar(app),
         "open-data" => {
             let dir = crate::config::config_path().parent().map(|p| p.to_path_buf()).unwrap_or_default();
@@ -103,8 +212,79 @@ fn handle(app: &AppHandle, id: &str) {
             crate::codex::request_refresh();
             crate::cursor::request_refresh();
             crate::antigravity::request_refresh();
+            crate::commandcode::request_refresh();
+            crate::router9::request_refresh();
+            crate::deepseek::request_refresh();
             let a = app.clone();
             std::thread::spawn(move || crate::reload_glyphs(&a));
+        }
+        "free-move" => {
+            {
+                let st = app.state::<crate::AppState>();
+                let mut c = st.cfg.lock().unwrap();
+                c.drag_enabled = !c.drag_enabled;
+                crate::config::save(&c);
+            }
+            crate::place_notch(app);
+            crate::emit_config(app);
+            refresh_menu(app);
+        }
+        "live-activity" => {
+            {
+                let st = app.state::<crate::AppState>();
+                let mut c = st.cfg.lock().unwrap();
+                c.live_activity = !c.live_activity;
+                crate::config::save(&c);
+            }
+            crate::emit_config(app);
+            refresh_menu(app);
+        }
+        "compact" => {
+            {
+                let st = app.state::<crate::AppState>();
+                let mut c = st.cfg.lock().unwrap();
+                c.compact = !c.compact;
+                crate::config::save(&c);
+            }
+            crate::emit_config(app);
+            refresh_menu(app);
+        }
+        _ if id.starts_with("alerts-") => {
+            if let Some((_, _, set)) = ALERT_PRESETS.iter().find(|(pid, _, _)| *pid == id) {
+                {
+                    let st = app.state::<crate::AppState>();
+                    let mut c = st.cfg.lock().unwrap();
+                    c.alert_levels = set.to_vec();
+                    crate::config::save(&c);
+                }
+                crate::emit_config(app);
+                refresh_menu(app);
+            }
+        }
+        _ if id.starts_with("opacity-") => {
+            if let Ok(pct) = id[8..].parse::<f64>() {
+                {
+                    let st = app.state::<crate::AppState>();
+                    let mut c = st.cfg.lock().unwrap();
+                    c.opacity = (pct / 100.0).clamp(0.15, 1.0);
+                    crate::config::save(&c);
+                }
+                crate::emit_config(app);
+                refresh_menu(app);
+            }
+        }
+        _ if id.starts_with("scale-") => {
+            if let Ok(pct) = id[6..].parse::<f64>() {
+                {
+                    let st = app.state::<crate::AppState>();
+                    let mut c = st.cfg.lock().unwrap();
+                    c.scale = (pct / 100.0).clamp(0.7, 1.6);
+                    crate::config::save(&c);
+                }
+                crate::place_notch(app);
+                crate::emit_config(app);
+                refresh_menu(app);
+            }
         }
         "autostart" => {
             let r = if crate::autostart::is_enabled() {

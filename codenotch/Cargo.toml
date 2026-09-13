@@ -1,7 +1,8 @@
 [package]
 name = "codenotch"
-version = "0.3.0"
+version = "0.4.0"
 edition = "2021"
+authors = ["penyu101"]
 description = "Codenotch for Windows — usage notch for Claude, Codex, Cursor and Antigravity"
 license = "MIT"
 repository = "https://github.com/Im-Midi/codenotch-windows"
@@ -23,6 +24,8 @@ png = "0.17" # application icon → PNG (provider marks taken from the installed
 chrono = { version = "0.4", default-features = false, features = ["std", "clock"] }
 # Cursor's credential lives in state.vscdb (SQLite); bundled = compile the SQLite C sources with the crate, which adds 1–2 minutes to the first build
 rusqlite = { version = "0.32", features = ["bundled"] }
+# 9Router's CLI token is sha256(machine-id + salt + cli-secret)[:16] — the same three local files the 9Router server itself hashes to authenticate its own CLI, borrowed read-only
+sha2 = "0.10"
 
 [target.'cfg(windows)'.dependencies]
 windows = { version = "0.58", features = [
@@ -35,4 +38,5 @@ windows = { version = "0.58", features = [
   "Win32_System_Threading",
   "Win32_Globalization",
   "Win32_System_Console",
+  "Win32_UI_Shell", # SHQueryUserNotificationState: is a full-screen app or presentation in front?
 ] }

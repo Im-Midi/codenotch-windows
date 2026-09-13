@@ -11,7 +11,7 @@ pub fn focus_terminal(claude_pid: u32) -> bool {
     };
     use windows::Win32::UI::WindowsAndMessaging::{
         EnumWindows, FlashWindowEx, GetWindowTextLengthW, GetWindowThreadProcessId, IsIconic,
-        IsWindowVisible, SetForegroundWindow, ShowWindow, FLASHWINFO, FLASHW_ALL, SW_RESTORE,
+        IsWindowVisible, ShowWindow, FLASHWINFO, FLASHW_ALL, SW_RESTORE,
     };
 
     if claude_pid == 0 {
@@ -101,7 +101,7 @@ pub fn focus_terminal(claude_pid: u32) -> bool {
         if IsIconic(hwnd).as_bool() {
             let _ = ShowWindow(hwnd, SW_RESTORE);
         }
-        let _ = SetForegroundWindow(hwnd);
+        force_foreground(hwnd);
         let fi = FLASHWINFO {
             cbSize: std::mem::size_of::<FLASHWINFO>() as u32,
             hwnd,
@@ -117,6 +117,22 @@ pub fn focus_terminal(claude_pid: u32) -> bool {
 #[cfg(not(windows))]
 pub fn focus_terminal(_claude_pid: u32) -> bool {
     false
+}
+
+/// Brings a window to the front from a process that never has focus itself. The notch is
+/// WS_EX_NOACTIVATE, and Windows' foreground lock refuses SetForegroundWindow from a process that
+/// did not receive the last input — so the jump quietly did nothing. A synthetic Alt tap counts as
+/// that input (the documented way around the lock), after which the switch is allowed.
+#[cfg(windows)]
+pub(crate) unsafe fn force_foreground(hwnd: windows::Win32::Foundation::HWND) {
+    use windows::Win32::UI::Input::KeyboardAndMouse::{keybd_event, KEYBD_EVENT_FLAGS, KEYEVENTF_KEYUP, VK_MENU};
+    use windows::Win32::UI::WindowsAndMessaging::{GetForegroundWindow, SetForegroundWindow};
+    if SetForegroundWindow(hwnd).as_bool() && GetForegroundWindow() == hwnd {
+        return;
+    }
+    keybd_event(VK_MENU.0 as u8, 0, KEYBD_EVENT_FLAGS(0), 0);
+    keybd_event(VK_MENU.0 as u8, 0, KEYEVENTF_KEYUP, 0);
+    let _ = SetForegroundWindow(hwnd);
 }
 
 // ---------------- Process and foreground helpers shared by seen-clears-it and the desktop jump-back ----------------
@@ -210,7 +226,7 @@ pub fn focus_claude_desktop() -> bool {
     use windows::Win32::Foundation::{BOOL, HWND, LPARAM, RECT};
     use windows::Win32::UI::WindowsAndMessaging::{
         EnumWindows, FlashWindowEx, GetWindowRect, GetWindowTextLengthW, GetWindowThreadProcessId,
-        IsIconic, IsWindowVisible, SetForegroundWindow, ShowWindow, FLASHWINFO, FLASHW_ALL,
+        IsIconic, IsWindowVisible, ShowWindow, FLASHWINFO, FLASHW_ALL,
         SW_RESTORE,
     };
     let maps = proc_maps();
@@ -255,7 +271,7 @@ pub fn focus_claude_desktop() -> bool {
         if IsIconic(hwnd).as_bool() {
             let _ = ShowWindow(hwnd, SW_RESTORE);
         }
-        let _ = SetForegroundWindow(hwnd);
+        force_foreground(hwnd);
         let fi = FLASHWINFO {
             cbSize: std::mem::size_of::<FLASHWINFO>() as u32,
             hwnd,

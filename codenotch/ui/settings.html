@@ -1,0 +1,454 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="UTF-8">
+<title>Codenotch — Settings</title>
+<style>
+  :root{
+    --bg:#0b0b0d;--card:#141417;--line:#26262b;--text:#ececf0;--mute:#8a8a93;
+    --ok:#28E07B;--warn:#FFBF00;--bad:#FF5A3C;--accent:#ececf0;
+    --spring:cubic-bezier(.34,1.8,.5,1);--ease:cubic-bezier(.22,1,.36,1);
+  }
+  *{box-sizing:border-box}
+  html,body{margin:0;background:var(--bg);color:var(--text);font:13px/1.45 "Segoe UI",system-ui,sans-serif;user-select:none}
+  main{padding:22px 22px 16px}
+  h1{font-size:18px;margin:0 0 3px;font-weight:650;letter-spacing:-.2px}
+  .sub{color:var(--mute);margin:0 0 18px}
+  .card{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:16px;margin-bottom:14px;
+    animation:rise .45s var(--ease) both}
+  .card:nth-of-type(2){animation-delay:.06s}
+  .card:nth-of-type(3){animation-delay:.12s}
+  @keyframes rise{from{opacity:0;transform:translateY(8px)}}
+  .card-h{display:flex;align-items:center;gap:10px;margin-bottom:6px}
+  .card-h h2{font-size:14px;margin:0;font-weight:650}
+  .chip{margin-left:auto;font-size:11px;padding:2px 9px;border-radius:99px;background:#222227;color:var(--mute);white-space:nowrap;
+    transition:background .25s,color .25s}
+  .chip.ok{background:rgba(40,224,123,.12);color:var(--ok)}
+  .desc{color:var(--mute);font-size:12px;margin:0 0 4px}
+  label{display:block;font-size:11px;color:var(--mute);margin:12px 0 5px;text-transform:uppercase;letter-spacing:.4px}
+  .field{display:flex;gap:6px}
+  input{flex:1;min-width:0;background:#0d0d10;border:1px solid var(--line);color:var(--text);border-radius:9px;padding:9px 11px;
+    font:13px ui-monospace,Consolas,monospace;outline:none;user-select:text;transition:border-color .15s,box-shadow .2s}
+  input:focus{border-color:#4a4a55;box-shadow:0 0 0 3px rgba(255,255,255,.06)}
+  input::placeholder{color:#55555e;font-family:"Segoe UI",system-ui,sans-serif}
+  button{font:inherit;font-size:12.5px;border-radius:9px;padding:8px 13px;border:1px solid var(--line);background:#1d1d22;color:var(--text);
+    cursor:pointer;white-space:nowrap;transition:background .15s,transform .3s var(--spring),opacity .15s}
+  button:hover{background:#26262c}
+  button:active{transform:scale(.95)}
+  button.primary{background:var(--accent);color:#0b0b0d;border-color:var(--accent);font-weight:600}
+  button.primary:hover{background:#fff}
+  button.ghost{background:transparent}
+  button.icon{padding:8px 10px;min-width:38px}
+  button:disabled{opacity:.5;cursor:default;transform:none}
+  button[hidden]{display:none}
+  .row{display:flex;gap:8px;margin-top:12px;align-items:center;flex-wrap:wrap}
+  .spacer{flex:1}
+  .result{margin-top:10px;font-size:12px;min-height:17px;opacity:0;transform:translateY(-3px);transition:opacity .2s,transform .35s var(--spring)}
+  .result.show{opacity:1;transform:none}
+  .result.ok{color:var(--ok)}.result.bad{color:var(--bad)}.result.warn{color:var(--warn)}
+  .note{font-size:11.5px;color:var(--mute);background:#101013;border:1px dashed var(--line);border-radius:9px;padding:8px 10px;margin:8px 0 0}
+  .saved-hint{font-size:11px;color:var(--ok);margin-left:6px;text-transform:none;letter-spacing:0}
+  details{margin-top:12px;border:1px solid var(--line);border-radius:10px;padding:0 12px;background:#101013;transition:border-color .2s}
+  details[open]{border-color:#34343c;padding-bottom:12px}
+  summary{cursor:pointer;list-style:none;padding:10px 0;font-size:12.5px;display:flex;align-items:center;gap:8px}
+  summary::-webkit-details-marker{display:none}
+  summary::before{content:"›";display:inline-block;transition:transform .3s var(--spring);color:var(--mute);font-size:15px;line-height:1}
+  details[open] summary::before{transform:rotate(90deg)}
+  details ol,details ul{margin:0 0 4px;padding-left:18px;color:#b9b9c2;font-size:12px}
+  details li{margin:4px 0}
+  details p{margin:6px 0;color:#b9b9c2;font-size:12px}
+  b{color:var(--text)}
+  /* accounts */
+  .acct-list{margin-top:10px;display:flex;flex-direction:column;gap:6px}
+  .acct{display:flex;align-items:center;gap:10px;background:#101013;border:1px solid var(--line);border-radius:10px;padding:8px 10px;
+    animation:rise .35s var(--ease) both}
+  .acct-main{min-width:0;flex:1}
+  .acct-name{font-size:12.5px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .acct-sub{font:11px ui-monospace,Consolas,monospace;color:var(--mute)}
+  .badge{font-size:10.5px;color:var(--mute);background:#1d1d22;border-radius:99px;padding:2px 8px;white-space:nowrap}
+  .acct button{padding:5px 10px;font-size:11.5px}
+  .acct-empty{font-size:12px;color:var(--mute)}
+  /* guide */
+  .guide h3{font-size:12.5px;margin:12px 0 4px}
+  /* right padding keeps wrapped commands clear of the Copy button pinned in the corner */
+  pre{margin:6px 0;position:relative;background:#0a0a0c;border:1px solid var(--line);border-radius:8px;padding:9px 64px 9px 10px;
+    font:11.5px/1.5 ui-monospace,Consolas,monospace;color:#d6d6de;white-space:pre-wrap;word-break:break-all;user-select:text}
+  pre button{position:absolute;top:6px;right:6px;padding:3px 8px;font-size:11px}
+  table{width:100%;border-collapse:collapse;font-size:11.5px;margin-top:6px}
+  td{border-top:1px solid var(--line);padding:6px 4px;vertical-align:top;color:#b9b9c2}
+  td:first-child{color:var(--warn);width:46%}
+  footer{color:#5c5c66;font-size:11px;text-align:center;margin-top:2px}
+  select{flex:1;background:#0d0d10;border:1px solid var(--line);color:var(--text);border-radius:9px;padding:8px 10px;font:inherit;outline:none}
+  .prov{display:flex;align-items:center;gap:10px;background:#101013;border:1px solid var(--line);border-radius:10px;padding:6px 8px 6px 10px}
+  .prov input[type=checkbox]{flex:0 0 auto;width:16px;height:16px;accent-color:#ececf0;cursor:pointer}
+  .prov .pname{flex:1;font-size:12.5px;font-weight:600}
+  .prov.off .pname{color:var(--mute);font-weight:400;text-decoration:line-through}
+  .prov button{padding:3px 9px;font-size:12px}
+</style>
+</head>
+<body>
+<main>
+  <h1>Settings</h1>
+  <p class="sub">Arrange the notch, and connect providers Codenotch can't find on this PC by itself.</p>
+
+  <section class="card" id="layoutCard">
+    <div class="card-h"><h2>Providers &amp; layout</h2><span class="chip" id="layoutChip">Saved</span></div>
+    <p class="desc">Order the cells with the arrows and untick the ones you don't want on the notch. Changes apply right away.</p>
+    <div class="acct-list" id="provList"></div>
+    <label for="theme">Theme</label>
+    <div class="field">
+      <select id="theme">
+        <option value="dark">Dark</option>
+        <option value="graphite">Graphite</option>
+        <option value="glass">Glass (see-through)</option>
+      </select>
+    </div>
+  </section>
+
+  <section class="card">
+    <div class="card-h"><h2>Command Code</h2><span class="chip" id="ccChip">…</span></div>
+    <p class="desc">Add one key per account — each is checked with Command Code before it is saved. With more than one, the notch shows a block per account.</p>
+    <div class="acct-list" id="ccList"></div>
+    <label for="ccKey">Add an account</label>
+    <div class="field">
+      <input id="ccKey" type="password" placeholder="Paste a Command Code API key" autocomplete="off" spellcheck="false">
+      <button class="icon ghost" id="ccShow" title="Show / hide">👁</button>
+    </div>
+    <div class="row">
+      <button class="ghost" id="ccGet">Get API key ↗</button>
+      <span class="spacer"></span>
+      <button class="primary" id="ccSave">Add &amp; test</button>
+    </div>
+    <div class="result" id="ccResult"></div>
+  </section>
+
+  <section class="card">
+    <div class="card-h"><h2>9Router</h2><span class="chip" id="r9Chip">…</span></div>
+    <p class="desc">A 9Router on this PC is read automatically. Fill these in only to read one running on another computer — see the guide below.</p>
+    <p class="note">9Router's usage API doesn't accept the API keys you create for its proxy — only its <b>CLI token</b>.</p>
+    <label for="r9Url">Server URL</label>
+    <div class="field"><input id="r9Url" type="text" placeholder="http://127.0.0.1:20128" autocomplete="off" spellcheck="false"></div>
+    <label for="r9Token">CLI token <span class="saved-hint" id="r9TokenHint" hidden>● saved — leave empty to keep it</span></label>
+    <div class="field">
+      <input id="r9Token" type="password" placeholder="16 hex characters — not an sk-… API key" autocomplete="off" spellcheck="false">
+      <button class="icon ghost" id="r9Show" title="Show / hide">👁</button>
+    </div>
+
+    <details id="cfBox">
+      <summary>Behind Cloudflare Access? <span class="saved-hint" id="cfHint" hidden>● service token saved</span></summary>
+      <ol>
+        <li>In Cloudflare Zero Trust open <b>Access controls → Service credentials → Service Tokens</b> and create one.</li>
+        <li>Open <b>Access controls → Applications</b>, pick the 9Router application and add a policy with action <b>Service Auth</b> that includes that token.</li>
+        <li>Paste its Client ID and Client Secret here — the whole header line from Cloudflare's copy button is fine.</li>
+      </ol>
+      <label for="cfId">Client ID</label>
+      <div class="field"><input id="cfId" type="text" placeholder="….access" autocomplete="off" spellcheck="false"></div>
+      <label for="cfSecret">Client Secret</label>
+      <div class="field">
+        <input id="cfSecret" type="password" placeholder="cfast_…" autocomplete="off" spellcheck="false">
+        <button class="icon ghost" id="cfShow" title="Show / hide">👁</button>
+      </div>
+      <div class="row"><button class="ghost" id="cfOpen">Open Zero Trust ↗</button></div>
+    </details>
+
+    <div class="row">
+      <button class="ghost" id="r9Copy" hidden>Copy this PC's token</button>
+      <button class="ghost" id="r9Dash">Dashboard ↗</button>
+      <span class="spacer"></span>
+      <button class="ghost" id="r9Reset">Reset</button>
+      <button class="primary" id="r9Save">Save &amp; test</button>
+    </div>
+    <div class="result" id="r9Result"></div>
+  </section>
+
+  <section class="card">
+    <div class="card-h"><h2>DeepSeek</h2><span class="chip" id="dsChip">…</span></div>
+    <p class="desc">Shows your API balance, and whether DeepSeek's peak or off-peak (50% cheaper) pricing is on right now — with an alert when it switches.</p>
+    <div class="acct-list" id="dsList"></div>
+    <label for="dsKey">API key</label>
+    <div class="field">
+      <input id="dsKey" type="password" placeholder="Paste a DeepSeek API key (sk-…)" autocomplete="off" spellcheck="false">
+      <button class="icon ghost" id="dsShow" title="Show / hide">👁</button>
+    </div>
+    <div class="row">
+      <button class="ghost" id="dsGet">Get API key ↗</button>
+      <span class="spacer"></span>
+      <button class="primary" id="dsSave">Save &amp; test</button>
+    </div>
+    <div class="result" id="dsResult"></div>
+  </section>
+
+  <section class="card guide">
+    <div class="card-h"><h2>Guide: 9Router Quota Tracker</h2></div>
+    <p class="desc">Shows every account 9Router manages — Antigravity, Claude, Codex… — with what is left and when it resets, just like its Quota Tracker page.</p>
+
+    <details>
+      <summary>1 · 9Router on this PC</summary>
+      <ol>
+        <li>Install and start it:</li>
+      </ol>
+      <pre data-copy>npm install -g 9router
+9router</pre>
+      <ol start="2">
+        <li>Open the dashboard at <b>http://localhost:20128</b> and sign in once (default password <b>123456</b> — change it). That first sign-in creates the token file Codenotch reads.</li>
+        <li>Connect your accounts in 9Router (<b>Providers</b>). Nothing to type here: tray → <b>Refresh usage now</b> and the <b>9r</b> cell appears.</li>
+      </ol>
+    </details>
+
+    <details>
+      <summary>2 · 9Router on another computer or server</summary>
+      <ol>
+        <li><b>Server URL</b>: the dashboard's address, e.g. <b>https://9router.example.com</b>. The <b>/v1</b> ending shown under "API Endpoint" is dropped automatically.</li>
+        <li><b>CLI token</b>: run this on the machine running 9Router (inside the container for Docker) and paste the 16-character result.</li>
+      </ol>
+      <p>Linux / macOS / Docker <span style="color:#6c6c75">(on macOS use <b>shasum -a 256</b> instead of sha256sum)</span></p>
+      <pre data-copy>D=${DATA_DIR:-$HOME/.9router}; printf '%s9r-cli-auth%s' "$(tr -d '[:space:]' &lt; "$D/machine-id")" "$(tr -d '[:space:]' &lt; "$D/auth/cli-secret")" | sha256sum | cut -c1-16</pre>
+      <p>Windows (PowerShell) — or install Codenotch there and use <b>Copy this PC's token</b></p>
+      <pre data-copy>$d="$env:APPDATA\9router"; $s=(Get-Content "$d\machine-id" -Raw).Trim()+"9r-cli-auth"+(Get-Content "$d\auth\cli-secret" -Raw).Trim(); -join ([Security.Cryptography.SHA256]::Create().ComputeHash([Text.Encoding]::UTF8.GetBytes($s))|%{$_.ToString('x2')}) | %{$_.Substring(0,16)}</pre>
+      <ol start="3"><li>Press <b>Save &amp; test</b>. "Connected to … · N requests today" means it works.</li></ol>
+    </details>
+
+    <details>
+      <summary>3 · Protected by Cloudflare Access</summary>
+      <p>If the URL opens a "Sign in · Cloudflare Access" page, Codenotch needs a service token:</p>
+      <ol>
+        <li>Zero Trust → <b>Access controls → Service credentials → Service Tokens</b> → <b>Create Service Token</b>. Copy the Client Secret now — Cloudflare shows it once.</li>
+        <li>Zero Trust → <b>Access controls → Applications</b> → your 9Router application → <b>Policies</b> → <b>Add a policy</b>: action <b>Service Auth</b>, include <b>Service Token</b> → your token. It must be <i>attached to the application</i>; a policy that only exists under "Policies" does nothing, and an <b>Allow</b> policy still asks for a login.</li>
+        <li>Paste both values under <b>Behind Cloudflare Access?</b> above and press <b>Save &amp; test</b>.</li>
+      </ol>
+    </details>
+
+    <details>
+      <summary>4 · Reading the notch</summary>
+      <ul>
+        <li><b>Ring</b>: the one quota closest to running out across all accounts, as the share <i>used</i> — like every other ring.</li>
+        <li><b>Card</b> (hover the 9r cell): a block per account with the share <i>left</i>, a bar and the reset countdown — as in 9Router. Hover a row for the raw numbers; scroll for more accounts.</li>
+        <li>Accounts refresh every 5 minutes, Claude every 10 — each read makes 9Router ask that vendor, so this stays gentle. Tray → <b>Refresh usage now</b> forces it.</li>
+        <li>Quotas hidden with the eye icon in 9Router's Quota Tracker stay hidden here.</li>
+      </ul>
+    </details>
+
+    <details>
+      <summary>5 · If something goes wrong</summary>
+      <table>
+        <tr><td>"This URL is behind Cloudflare Access…"</td><td>Add a service token (section 3).</td></tr>
+        <tr><td>"Cloudflare Access refused the service token"</td><td>The Service Auth policy is missing, is an Allow policy, or isn't attached to the 9Router application.</td></tr>
+        <tr><td>"…the saved token is one of its proxy API keys (sk-…)"</td><td>You pasted an API key from "API Keys". Use the CLI token from section 2.</td></tr>
+        <tr><td>"Reached 9Router, but it rejected this CLI token"</td><td>The token belongs to another install, or 9Router's cli-secret changed. Run the command again.</td></tr>
+        <tr><td>"…answered with a web page" / "redirects to …"</td><td>The URL isn't 9Router's dashboard address. Check it opens the dashboard in a browser.</td></tr>
+        <tr><td>An account says "needs re-authorising in 9Router"</td><td>That provider's sign-in expired inside 9Router — reconnect it there.</td></tr>
+      </table>
+    </details>
+
+    <details>
+      <summary>6 · Keep it safe</summary>
+      <ul>
+        <li>The CLI token opens 9Router's admin API (settings, shutdown, updates). Treat it like a password; never share a screenshot of it.</li>
+        <li>To replace it: delete <b>auth/cli-secret</b> in 9Router's data folder, restart 9Router, run the command again.</li>
+        <li>Everything you paste here is kept in Windows Credential Manager, never in a plain file.</li>
+      </ul>
+      <div class="row"><button class="ghost" id="r9Repo">9Router on GitHub ↗</button></div>
+    </details>
+  </section>
+
+  <footer>Keys are kept in Windows Credential Manager — never written to a plain file.<br>
+    Created by <b>penyu101</b> · based on Codenotch (MIT)</footer>
+</main>
+<script>
+const invoke = window.__TAURI__.core.invoke;
+const $ = id => document.getElementById(id);
+function say(el, cls, msg){ el.className = 'result show ' + cls; el.textContent = msg; }
+function busy(btn, on, label){ btn.disabled = on; if(label) btn.textContent = label; }
+function toggle(input){ input.type = input.type === 'password' ? 'text' : 'password'; }
+
+const CC_SOURCE = {saved:'Saved here', env:'COMMAND_CODE_API_KEY', 'auth.json':'Command Code app'};
+function renderCc(list){
+  $('ccChip').textContent = list.length ? `${list.length} account${list.length > 1 ? 's' : ''}` : 'Not connected';
+  $('ccChip').className = 'chip' + (list.length ? ' ok' : '');
+  const box = $('ccList'); box.innerHTML = '';
+  if(!list.length){ box.innerHTML = '<div class="acct-empty">No accounts yet.</div>'; return; }
+  for(const a of list){
+    // textContent throughout: labels come from Command Code's API
+    const row = document.createElement('div'); row.className = 'acct';
+    row.innerHTML = '<div class="acct-main"><div class="acct-name"></div><div class="acct-sub"></div></div><span class="badge"></span>';
+    row.querySelector('.acct-name').textContent = a.label || 'Unnamed account';
+    row.querySelector('.acct-sub').textContent = a.masked;
+    row.querySelector('.badge').textContent = CC_SOURCE[a.source] || a.source;
+    if(a.source === 'saved'){
+      const b = document.createElement('button'); b.className = 'ghost'; b.textContent = 'Remove';
+      b.onclick = async () => {
+        b.disabled = true;
+        const r = await invoke('remove_commandcode_key', {id: a.id});
+        say($('ccResult'), r.ok ? 'warn' : 'bad', r.ok ? `Removed ${a.label || 'the account'}.` : r.message);
+        refresh();
+      };
+      row.appendChild(b);
+    }
+    box.appendChild(row);
+  }
+}
+
+function renderDs(s){
+  const src = s.ds_source;
+  $('dsChip').textContent = src ? 'Connected' : 'Not connected';
+  $('dsChip').className = 'chip' + (src ? ' ok' : '');
+  const box = $('dsList'); box.innerHTML = '';
+  if(!src) return;
+  const row = document.createElement('div'); row.className = 'acct';
+  row.innerHTML = '<div class="acct-main"><div class="acct-name">DeepSeek API</div><div class="acct-sub"></div></div><span class="badge"></span>';
+  row.querySelector('.acct-sub').textContent = s.ds_masked || '';
+  row.querySelector('.badge').textContent = src === 'saved' ? 'Saved here' : 'DEEPSEEK_API_KEY';
+  if(src === 'saved'){
+    const b = document.createElement('button'); b.className = 'ghost'; b.textContent = 'Remove';
+    b.onclick = async () => {
+      b.disabled = true;
+      const r = await invoke('remove_deepseek_key');
+      say($('dsResult'), 'warn', r.message); refresh();
+    };
+    row.appendChild(b);
+  }
+  box.appendChild(row);
+}
+
+async function saveDs(){
+  const btn = $('dsSave');
+  busy(btn, true, 'Checking…'); say($('dsResult'), 'warn', 'Checking the key with DeepSeek…');
+  try {
+    const r = await invoke('save_deepseek_key', {key: $('dsKey').value});
+    say($('dsResult'), r.ok ? 'ok' : (r.saved ? 'warn' : 'bad'), r.message);
+    if(r.saved) $('dsKey').value = '';
+  } catch(e){ say($('dsResult'), 'bad', String(e)); }
+  busy(btn, false, 'Save & test'); refresh();
+}
+
+let first = true;
+async function refresh(){
+  let s; try { s = await invoke('settings_status'); } catch(e){ return; }
+  renderCc(s.cc_accounts || []);
+  renderDs(s);
+  const r9Label = {saved:'Token saved here', local:"Using this PC's 9Router"}[s.r9_token_source];
+  $('r9Chip').textContent = r9Label || 'Not connected';
+  $('r9Chip').className = 'chip' + (s.r9_token_source ? ' ok' : '');
+  $('r9Copy').hidden = !s.r9_local_available;
+  $('r9TokenHint').hidden = s.r9_token_source !== 'saved';
+  $('cfHint').hidden = !s.r9_cf_access;
+  if(first){
+    if(s.r9_url_custom) $('r9Url').value = s.r9_url; // never overwrite what is being typed
+    if(s.r9_cf_access) $('cfBox').open = true;
+  }
+  first = false;
+}
+
+$('ccShow').onclick = () => toggle($('ccKey'));
+$('r9Show').onclick = () => toggle($('r9Token'));
+$('cfShow').onclick = () => toggle($('cfSecret'));
+$('ccGet').onclick = () => invoke('open_link', {which:'commandcode_keys'});
+$('r9Dash').onclick = () => invoke('open_link', {which:'router9_dashboard'});
+$('cfOpen').onclick = () => invoke('open_link', {which:'cf_service_tokens'});
+$('r9Repo').onclick = () => invoke('open_link', {which:'router9_repo'});
+$('dsShow').onclick = () => toggle($('dsKey'));
+$('dsGet').onclick = () => invoke('open_link', {which:'deepseek_keys'});
+$('dsSave').onclick = saveDs;
+$('dsKey').addEventListener('keydown', e => { if(e.key === 'Enter') saveDs(); });
+
+async function saveCc(){
+  const btn = $('ccSave'), key = $('ccKey').value;
+  busy(btn, true, 'Checking…'); say($('ccResult'), 'warn', 'Checking the key with Command Code…');
+  try {
+    const r = await invoke('save_commandcode_key', {key});
+    say($('ccResult'), r.ok ? 'ok' : (r.saved ? 'warn' : 'bad'), r.message);
+    if(r.saved) $('ccKey').value = '';
+  } catch(e){ say($('ccResult'), 'bad', String(e)); }
+  busy(btn, false, 'Add & test'); refresh();
+}
+$('ccSave').onclick = saveCc;
+$('ccKey').addEventListener('keydown', e => { if(e.key === 'Enter') saveCc(); });
+
+async function saveR9(){
+  const btn = $('r9Save');
+  busy(btn, true, 'Checking…'); say($('r9Result'), 'warn', 'Reaching 9Router…');
+  try {
+    const r = await invoke('save_router9', {
+      url: $('r9Url').value, token: $('r9Token').value, cfId: $('cfId').value, cfSecret: $('cfSecret').value });
+    say($('r9Result'), r.ok ? 'ok' : (r.saved ? 'warn' : 'bad'), r.message);
+    if(r.saved){ $('r9Token').value = ''; $('cfId').value = ''; $('cfSecret').value = ''; }
+    if(r.access_blocked){ $('cfBox').open = true; $('cfId').focus(); }
+  } catch(e){ say($('r9Result'), 'bad', String(e)); }
+  busy(btn, false, 'Save & test'); refresh();
+}
+$('r9Save').onclick = saveR9;
+for(const id of ['r9Token','cfSecret']) $(id).addEventListener('keydown', e => { if(e.key === 'Enter') saveR9(); });
+$('r9Reset').onclick = async () => {
+  for(const id of ['r9Url','r9Token','cfId','cfSecret']) $(id).value = '';
+  await invoke('clear_router9');
+  say($('r9Result'), 'warn', "Reset — reading this PC's own 9Router again."); refresh();
+};
+$('r9Copy').onclick = async () => {
+  const t = await invoke('router9_local_token');
+  if(!t){ say($('r9Result'), 'bad', "This PC's 9Router has not created its token yet — open its dashboard once."); return; }
+  try { await navigator.clipboard.writeText(t); say($('r9Result'), 'ok', "Copied. Paste it into Codenotch on the other computer."); }
+  catch { $('r9Token').type = 'text'; $('r9Token').value = t; $('r9Token').select();
+          say($('r9Result'), 'warn', 'Clipboard unavailable — the token is shown above; copy it with Ctrl+C.'); }
+};
+
+// Copy buttons on the guide's commands; if the clipboard is refused the text is selected instead
+for(const pre of document.querySelectorAll('pre[data-copy]')){
+  const b = document.createElement('button'); b.className = 'ghost'; b.textContent = 'Copy';
+  b.onclick = async () => {
+    const text = pre.firstChild.textContent;
+    try { await navigator.clipboard.writeText(text); b.textContent = 'Copied'; }
+    catch { const r = document.createRange(); r.selectNodeContents(pre.firstChild); const sel = getSelection(); sel.removeAllRanges(); sel.addRange(r); b.textContent = 'Ctrl+C'; }
+    setTimeout(() => b.textContent = 'Copy', 1600);
+  };
+  pre.appendChild(b);
+}
+
+// ---- Providers & layout: order, visibility, theme — saved on every change ----
+const PROVIDERS = [['claude','Claude'],['codex','Codex'],['cursor','Cursor'],['gemini','Antigravity'],
+  ['commandcode','Command Code'],['router9','9Router'],['deepseek','DeepSeek']];
+let layout = {order: PROVIDERS.map(p => p[0]), hidden: [], theme: 'dark'};
+function orderedIds(order){
+  const known = PROVIDERS.map(p => p[0]);
+  return [...order.filter(id => known.includes(id)), ...known.filter(id => !order.includes(id))];
+}
+function renderLayout(){
+  const box = $('provList'); box.innerHTML = '';
+  const ids = layout.order;
+  ids.forEach((id, i) => {
+    const name = (PROVIDERS.find(p => p[0] === id) || [id, id])[1];
+    const off = layout.hidden.includes(id);
+    const row = document.createElement('div'); row.className = 'prov' + (off ? ' off' : '');
+    row.innerHTML = `<input type="checkbox" ${off ? '' : 'checked'} title="Show on the notch"><span class="pname"></span>`
+      + `<button class="ghost" ${i === 0 ? 'disabled' : ''} title="Move up">↑</button>`
+      + `<button class="ghost" ${i === ids.length - 1 ? 'disabled' : ''} title="Move down">↓</button>`;
+    row.querySelector('.pname').textContent = name;
+    row.querySelector('input').onchange = e => {
+      layout.hidden = e.target.checked ? layout.hidden.filter(h => h !== id) : [...layout.hidden, id];
+      saveLayout();
+    };
+    const [up, down] = row.querySelectorAll('button');
+    up.onclick = () => { [ids[i-1], ids[i]] = [ids[i], ids[i-1]]; saveLayout(); };
+    down.onclick = () => { [ids[i+1], ids[i]] = [ids[i], ids[i+1]]; saveLayout(); };
+    box.appendChild(row);
+  });
+  $('theme').value = layout.theme;
+}
+async function saveLayout(){
+  renderLayout();
+  $('layoutChip').textContent = 'Saving…'; $('layoutChip').className = 'chip';
+  try {
+    await invoke('save_layout', {order: layout.order, hidden: layout.hidden, theme: layout.theme});
+    $('layoutChip').textContent = 'Saved'; $('layoutChip').className = 'chip ok';
+  } catch(e){ $('layoutChip').textContent = 'Not saved'; }
+}
+$('theme').onchange = e => { layout.theme = e.target.value; saveLayout(); };
+invoke('get_config').then(c => {
+  layout = {order: orderedIds(c.provider_order || []), hidden: c.hidden_providers || [], theme: c.theme || 'dark'};
+  renderLayout();
+}).catch(() => renderLayout());
+
+window.addEventListener('focus', refresh); // e.g. after running `cmdc login` in a terminal
+refresh();
+</script>
+</body>
+</html>
