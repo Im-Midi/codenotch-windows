@@ -214,6 +214,10 @@ enum CodexStep {
     Waiting,
 }
 
+fn codex_item_is_active(item_type: &str) -> bool {
+    !matches!(item_type, "agentmessage" | "contextcompaction")
+}
+
 fn codex_last_step(text: &str) -> Option<(CodexStep, u64)> {
     for line in text.lines().rev().filter(|l| !l.trim().is_empty()) {
         let Ok(v) = serde_json::from_str::<serde_json::Value>(line) else { continue };
@@ -263,6 +267,8 @@ fn codex_last_step(text: &str) -> Option<(CodexStep, u64)> {
 /// The app maintains this turn table itself, which is far more reliable than a file mtime. Guard
 /// against "inProgress forever after a crash": no new item for the thread in the last 10 minutes
 /// (`thread_items.created_at_ms`) while the turn started more than 2 minutes ago → treated as stale.
+/// A completed `agentMessage` or `contextCompaction` item is terminal even when the desktop leaves
+/// the turn row inProgress.
 fn codex_turns_in_progress(ctx: &mut Ctx) -> Vec<Activity> {
     let now = now_ms();
     if ctx.codex_names.is_none() {
@@ -316,6 +322,9 @@ fn codex_turns_in_progress(ctx: &mut Ctx) -> Vec<Activity> {
                 name = "Codex".into();
             }
             let lt = last_type.unwrap_or_default().to_lowercase();
+            if !codex_item_is_active(&lt) {
+                continue;
+            }
             let waiting = lt.contains("approval") || lt.contains("permission") || lt.contains("request_user");
             out.push(Activity {
                 provider: "codex".into(),
@@ -648,5 +657,7 @@ mod tests {
         let tool=r#"{"type":"response_item","payload":{"type":"function_call"}}"#;
         assert_eq!(codex_last_step(tool).unwrap().0,CodexStep::Tool);
         assert!(codex_last_step(r#"{"type":"event_msg","payload":{"type":"token_count"}}"#).is_none());
+        assert!(!codex_item_is_active("agentmessage"));
+        assert!(codex_item_is_active("reasoning"));
     }
 }
