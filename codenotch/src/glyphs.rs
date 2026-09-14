@@ -4,8 +4,9 @@
 //!   1. User override: `%APPDATA%\codenotch\glyphs\<id>.svg|.png`, or `glyphs\` next to the exe;
 //!   2. Built in: the `glyphs/*.svg` compiled into the exe, from npm `@lobehub/icons-static-svg`
 //!      1.95.0 (MIT), files unmodified; trademark notice in glyphs/NOTICE.md;
-//!   3. The installed application's own icon (PrivateExtractIconsW on the exe resources, 64 px → PNG);
-//!   none of those → the page falls back to a letter.
+//!   3. The installed application's own icon (PrivateExtractIconsW on the exe resources, 64 px → PNG).
+//!
+//! None of those → the page falls back to a letter.
 //! SVGs are inlined into the DOM as text (`fill="currentColor"` follows the CSS white/dimmed state);
 //! PNGs and app icons go through <img>. Ids match the page and upstream: claude / codex / cursor / gemini.
 
@@ -56,8 +57,7 @@ fn sanitize_svg(s: &str) -> String {
     let lo = out.to_ascii_lowercase();
     let mut res = String::with_capacity(out.len());
     let mut i = 0;
-    loop {
-        let Some(rel) = lo[i..].find(" on") else { break };
+    while let Some(rel) = lo[i..].find(" on") {
         let start = i + rel;
         let name_len = lo[start + 3..].bytes().take_while(|b| b.is_ascii_alphanumeric()).count();
         let eq = start + 3 + name_len;
@@ -98,7 +98,7 @@ pub fn user_dir() -> PathBuf {
 
 fn b64(bytes: &[u8]) -> String {
     const T: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    let mut out = String::with_capacity((bytes.len() + 2) / 3 * 4);
+    let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
     for chunk in bytes.chunks(3) {
         let b = [chunk[0], *chunk.get(1).unwrap_or(&0), *chunk.get(2).unwrap_or(&0)];
         let n = ((b[0] as u32) << 16) | ((b[1] as u32) << 8) | b[2] as u32;
@@ -205,14 +205,16 @@ fn from_exe(p: &Path) -> Option<Glyph> {
             let (w, h) = (bm.bmWidth, bm.bmHeight);
             if w > 0 && h > 0 && w <= 512 && h <= 512 {
                 let hdc = GetDC(None);
-                let mut bi = BITMAPINFO::default();
-                bi.bmiHeader = BITMAPINFOHEADER {
-                    biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
-                    biWidth: w,
-                    biHeight: -h, // top-down
-                    biPlanes: 1,
-                    biBitCount: 32,
-                    biCompression: BI_RGB.0,
+                let mut bi = BITMAPINFO {
+                    bmiHeader: BITMAPINFOHEADER {
+                        biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
+                        biWidth: w,
+                        biHeight: -h, // top-down
+                        biPlanes: 1,
+                        biBitCount: 32,
+                        biCompression: BI_RGB.0,
+                        ..Default::default()
+                    },
                     ..Default::default()
                 };
                 let mut buf = vec![0u8; (w * h * 4) as usize];
@@ -220,8 +222,8 @@ fn from_exe(p: &Path) -> Option<Glyph> {
                 let _ = ReleaseDC(None, hdc);
                 if lines > 0 {
                     // BGRA → RGBA; old-style icons with all-zero alpha are treated as opaque
-                    let any_alpha = buf.chunks_exact(4).any(|px| px[3] != 0);
-                    for px in buf.chunks_exact_mut(4) {
+                    let any_alpha = buf.as_chunks::<4>().0.iter().any(|px| px[3] != 0);
+                    for px in buf.as_chunks_mut::<4>().0 {
                         px.swap(0, 2);
                         if !any_alpha {
                             px[3] = 255;

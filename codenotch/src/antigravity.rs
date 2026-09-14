@@ -1,13 +1,11 @@
-//! Antigravity (Google's IDE, Gemini quota) usage adapter, implemented from the upstream
-//! Codenotch's documented behaviour.
+//! Antigravity usage adapter.
 //!
-//! Google publishes no usage numbers to third parties: `cloudcode-pa`'s `retrieveUserQuotaSummary`
-//! answers a personal account with 403 #3501 "no valid license" (it looks at *who* is asking, and
-//! impersonating Antigravity is off the table). Upstream's answer is Antigravity's own answer: ask
-//! the language_server running on this machine — it holds the credential and the client identity
-//! and asks Google itself.
+//! Preferred path: when official Antigravity CLI (`agy.exe`) is installed
+//! (`%LOCALAPPDATA%\agy\bin\agy.exe` or `PATH`), executes standalone `agy --print /usage`
+//! via native Windows ConPTY inside a bounded JobObject without running the full IDE.
+//! Refreshes at startup and explicit/hover requests with a 5-minute TTL cache.
 //!
-//! Data paths, most honest first (same as upstream):
+//! Fallback path, when the CLI is absent (as upstream, most honest first):
 //!   1. Local bridge: find the `language_server*` process (its command line carries
 //!      `--csrf_token <t>`; the port is `--https_server_port 0`, i.e. random at runtime, and can
 //!      only be found in the listening table; it opens two ports and only one answers this RPC,
@@ -28,8 +26,8 @@
 //!      (`{"metadata":{"pluginType":"GEMINI"}}`, not ANTIGRAVITY) for the tier name; then try
 //!      `:retrieveUserQuotaSummary` (empty body `{}`), which is 200 only for licensed accounts, and
 //!      parse it defensively (no positive limit, or used > 1.5×limit → discard).
-//!   4. Fallback: count today's `source=="MODEL"` steps in
-//!      `~/.gemini/antigravity/brain/*/.system_generated/logs/transcript.jsonl` (created_at is UTC,
+//!   4. Fallback: count today's `source=="MODEL"` steps in every install's
+//!      `~/.gemini/antigravity*/brain/*/.system_generated/logs/transcript.jsonl` (created_at is UTC,
 //!      compared by local day). This is a **count, not a percentage** — there is no published
 //!      denominator, so the ring draws only its track.
 //!
@@ -37,21 +35,42 @@
 
 use crate::usage::{LimitWindow, UsageSnapshot};
 use crate::AppState;
-use std::path::PathBuf;
-use std::sync::Arc;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tauri::{AppHandle, Emitter, Manager};
 
 const POLL_SECS: u64 = 300;
+const CLI_TTL: Duration = Duration::from_secs(300);
 const LOAD_CODE_ASSIST: &str = "https://cloudcode-pa.googleapis.com/v1internal:loadCodeAssist";
 const QUOTA_SUMMARY: &str = "https://cloudcode-pa.googleapis.com/v1internal:retrieveUserQuotaSummary";
 const LS_SERVICE: &str = "/exa.language_server_pb.LanguageServerService/RetrieveUserQuotaSummary";
 const CSRF_HEADER: &str = "x-codeium-csrf-token";
 
-static REFRESH: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+static REFRESH_CLI: Mutex<Option<std::sync::mpsc::SyncSender<()>>> = Mutex::new(None);
+static REFRESH_LEGACY: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 pub fn request_refresh() {
-    REFRESH.store(true, std::sync::atomic::Ordering::Relaxed);
+    if let Some(sender) = REFRESH_CLI.lock().unwrap().as_ref() {
+        let _ = sender.try_send(());
+    } else {
+        REFRESH_LEGACY.store(true, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
+pub fn request_hover_refresh() {
+    // Hover must not wake the legacy adapter's periodic poller.
+    if let Some(sender) = REFRESH_CLI.lock().unwrap().as_ref() {
+        let _ = sender.try_send(());
+    }
+}
+
+#[cfg(test)]
+#[test]
+fn hover_does_not_request_legacy_refresh() {
+    assert!(REFRESH_CLI.lock().unwrap().is_none());
+    request_hover_refresh();
+    assert!(!REFRESH_LEGACY.load(std::sync::atomic::Ordering::Relaxed));
 }
 
 fn now_ms() -> u64 {
@@ -61,8 +80,23 @@ fn now_ms() -> u64 {
         .unwrap_or(0)
 }
 
-fn state_root() -> Option<PathBuf> {
-    dirs::home_dir().map(|h| h.join(".gemini").join("antigravity"))
+/// Every install's state directory — `antigravity`, `antigravity-ide`, `antigravity-cli`, … — not
+/// just the first that exists: switching flavour leaves the old directory behind, so the first can
+/// be empty while the transcripts sit in the next (#84 hit this on macOS).
+pub(crate) fn state_roots() -> Vec<PathBuf> {
+    dirs::home_dir().map(|h| state_roots_in(&h)).unwrap_or_default()
+}
+
+fn state_roots_in(home: &Path) -> Vec<PathBuf> {
+    let Ok(rd) = std::fs::read_dir(home.join(".gemini")) else { return vec![] };
+    let mut out: Vec<PathBuf> = rd
+        .flatten()
+        .filter(|e| e.file_name().to_string_lossy().starts_with("antigravity"))
+        .map(|e| e.path())
+        .filter(|p| p.is_dir())
+        .collect();
+    out.sort();
+    out
 }
 
 fn store_path() -> PathBuf {
@@ -70,27 +104,53 @@ fn store_path() -> PathBuf {
 }
 
 pub fn load_persisted() -> UsageSnapshot {
-    std::fs::read_to_string(store_path())
-        .ok()
-        .and_then(|t| serde_json::from_str::<UsageSnapshot>(&t).ok())
-        .map(|mut s| {
-            if !s.windows.is_empty() {
-                s.status = "stale".into();
-            }
-            s
-        })
-        .unwrap_or_default()
-}
-
-fn persist(s: &UsageSnapshot) {
-    if let Ok(t) = serde_json::to_string_pretty(s) {
-        let _ = std::fs::write(store_path(), t);
+    if crate::agy_cli::find_agy().is_some() {
+        let mut snap = std::fs::read_to_string(store_path())
+            .ok()
+            .and_then(|s| serde_json::from_str::<UsageSnapshot>(&s).ok())
+            .unwrap_or_default();
+        if !snap.note.starts_with("via Antigravity CLI") {
+            snap = UsageSnapshot::default();
+        }
+        snap.status = if snap.windows.is_empty() {
+            "error"
+        } else if now_ms().saturating_sub(snap.fetched_at) < CLI_TTL.as_millis() as u64 {
+            "ok"
+        } else {
+            "stale"
+        }
+        .into();
+        if snap.windows.is_empty() {
+            snap.note = "Waiting for Antigravity CLI quota".into();
+        }
+        snap
+    } else {
+        std::fs::read_to_string(store_path())
+            .ok()
+            .and_then(|t| serde_json::from_str::<UsageSnapshot>(&t).ok())
+            .map(|mut s| {
+                if !s.windows.is_empty() {
+                    s.status = "stale".into();
+                }
+                s
+            })
+            .unwrap_or_default()
     }
 }
 
-/// Is Antigravity installed: the state directory exists, or Credential Manager holds its token
+fn persist(s: &UsageSnapshot) {
+    let _ = crate::agy_cli::save_persisted_to(&store_path(), s);
+}
+
+/// Is Antigravity installed: the official CLI is available, or any state
+/// directory exists, or Credential Manager holds its token
 pub fn present() -> bool {
-    state_root().map(|p| p.is_dir()).unwrap_or(false) || read_credential_raw().is_some()
+    crate::agy_cli::find_agy().is_some() || legacy_present()
+}
+
+/// Every `~/.gemini/antigravity*` install counts, not only the first one found.
+fn legacy_present() -> bool {
+    !state_roots().is_empty() || read_credential_raw().is_some()
 }
 
 // ---------------- 1. Local bridge ----------------
@@ -237,16 +297,49 @@ pub fn windows_from_bridge(v: &serde_json::Value) -> Vec<LimitWindow> {
                 continue;
             }
             let bname = b.get("displayName").and_then(|x| x.as_str());
+            let id = b.get("bucketId").and_then(|x| x.as_str()).or(gname).unwrap_or("quota").to_string();
             out.push(LimitWindow {
-                id: b.get("bucketId").and_then(|x| x.as_str()).or(gname).unwrap_or("quota").to_string(),
-                label: gname.or(bname).unwrap_or("Usage").to_string(),
+                label: lane_name(&id).or(gname).or(bname).unwrap_or("Usage").to_string(),
+                group: gname.map(String::from),
+                id,
                 used: (1.0 - rem).clamp(0.0, 1.0),
                 resets_at: parse_iso(b.get("resetTime")),
                 ..Default::default()
             });
         }
     }
+    order_lanes(&mut out);
     out
+}
+
+/// "5-hour Limit" or "Weekly Limit", as the Mac card names Antigravity's lanes, from the language
+/// server's `gemini-5h` ids or the CLI's "Gemini Models Five Hour Limit" ones
+pub(crate) fn lane_name(id: &str) -> Option<&'static str> {
+    let id = id.to_lowercase();
+    if id.contains("weekly") {
+        Some("Weekly Limit")
+    } else if ["5h", "five hour", "hourly"].iter().any(|k| id.contains(k)) {
+        Some("5-hour Limit")
+    } else {
+        None
+    }
+}
+
+/// The Mac card's order: groups as the source lists them, and in each the 5-hour lane before the
+/// weekly one. The language server and the CLI both send weekly first.
+pub(crate) fn order_lanes(windows: &mut [LimitWindow]) {
+    let mut groups: Vec<Option<String>> = Vec::new();
+    for w in windows.iter() {
+        if !groups.contains(&w.group) {
+            groups.push(w.group.clone());
+        }
+    }
+    let rank = |w: &LimitWindow| match lane_name(&w.id) {
+        Some("5-hour Limit") => 0,
+        Some(_) => 1,
+        None => 2,
+    };
+    windows.sort_by_key(|w| (groups.iter().position(|g| *g == w.group), rank(w)));
 }
 
 // ---------------- 3. Credential path ----------------
@@ -291,7 +384,7 @@ fn read_credential_raw() -> Option<Vec<u8>> {
 fn decode_credential(raw: &[u8]) -> Option<Creds> {
     let mut text = String::from_utf8(raw.to_vec()).unwrap_or_else(|_| {
         // Some writers store the blob as UTF-16LE
-        let u16s: Vec<u16> = raw.chunks_exact(2).map(|c| u16::from_le_bytes([c[0], c[1]])).collect();
+        let u16s: Vec<u16> = raw.as_chunks::<2>().0.iter().map(|c| u16::from_le_bytes(*c)).collect();
         String::from_utf16_lossy(&u16s)
     });
     text = text.trim_matches('\0').trim().to_string();
@@ -421,15 +514,16 @@ fn direct_quota(token: &str) -> Option<Vec<LimitWindow>> {
 
 // ---------------- 4. Fallback count ----------------
 
-/// Today's MODEL steps (UTC timestamps compared by local day)
+/// Today's MODEL steps across every install (UTC timestamps compared by local day)
 pub fn requests_today() -> (u64, Option<u64>) {
-    use chrono::{Datelike, Local, TimeZone};
-    let Some(root) = state_root().map(|r| r.join("brain")) else { return (0, None) };
-    let Ok(rd) = std::fs::read_dir(&root) else { return (0, None) };
-    let today = Local::now().date_naive();
+    requests_in(&state_roots(), chrono::Local::now().date_naive())
+}
+
+fn requests_in(roots: &[PathBuf], today: chrono::NaiveDate) -> (u64, Option<u64>) {
+    use chrono::{Local, TimeZone};
     let mut count = 0u64;
     let mut latest: Option<u64> = None;
-    for e in rd.flatten() {
+    for e in roots.iter().filter_map(|r| std::fs::read_dir(r.join("brain")).ok()).flat_map(|rd| rd.flatten()) {
         let p = e.path().join(".system_generated").join("logs").join("transcript.jsonl");
         let Ok(text) = std::fs::read_to_string(&p) else { continue };
         for line in text.lines() {
@@ -450,7 +544,6 @@ pub fn requests_today() -> (u64, Option<u64>) {
                     count += 1;
                 }
             }
-            let _ = today.year(); // keeps the Datelike import in use
         }
     }
     (count, latest)
@@ -548,6 +641,7 @@ fn read_once(rt: &mut Runtime, prev: &UsageSnapshot) -> UsageSnapshot {
         resets_at: None,
         count: Some(n as i64),
         derived: true,
+        ..Default::default()
     }];
     snap.note = match tier {
         Some(t) => format!("{t} · Google publishes no quota for this account"),
@@ -565,7 +659,7 @@ fn broadcast(app: &AppHandle, snap: UsageSnapshot) {
 
 fn sleep_interruptible(secs: u64) {
     for _ in 0..secs {
-        if REFRESH.swap(false, std::sync::atomic::Ordering::Relaxed) {
+        if REFRESH_LEGACY.swap(false, std::sync::atomic::Ordering::Relaxed) {
             return;
         }
         std::thread::sleep(Duration::from_secs(1));
@@ -573,17 +667,86 @@ fn sleep_interruptible(secs: u64) {
 }
 
 pub fn start(app: AppHandle) {
+    if crate::agy_cli::find_agy().is_some() {
+        start_cli(app);
+    } else {
+        start_legacy(app);
+    }
+}
+
+fn start_cli(app: AppHandle) {
+    let (sender, receiver) = std::sync::mpsc::sync_channel(1);
+    *REFRESH_CLI.lock().unwrap() = Some(sender);
+
     std::thread::spawn(move || {
         {
             let st = app.state::<AppState>();
             let snap = st.antigravity.lock().unwrap().clone();
             let _ = app.emit("antigravity", &snap);
         }
-        if !present() {
+
+        let mut last_attempt: Option<Instant> = None;
+
+        while receiver.recv().is_ok() {
+            if last_attempt.is_some_and(|last| last.elapsed() < CLI_TTL) {
+                continue;
+            }
+            let st = app.state::<AppState>();
+            let previous = st.antigravity.lock().unwrap().clone();
+            if !previous.windows.is_empty()
+                && now_ms().saturating_sub(previous.fetched_at) < CLI_TTL.as_millis() as u64
+            {
+                continue;
+            }
+            last_attempt = Some(Instant::now());
+
+            let snap = match crate::agy_cli::read_quota() {
+                Ok(windows) => UsageSnapshot {
+                    status: "ok".into(),
+                    windows,
+                    fetched_at: now_ms(),
+                    note: "via Antigravity CLI".into(),
+                    ..Default::default()
+                },
+                Err(error) => UsageSnapshot {
+                    status: if previous.windows.is_empty() {
+                        "error".into()
+                    } else {
+                        "stale".into()
+                    },
+                    note: format!(
+                        "via Antigravity CLI — {error}.{}",
+                        if previous.windows.is_empty() {
+                            ""
+                        } else {
+                            " Last reading kept."
+                        }
+                    ),
+                    ..previous
+                },
+            };
+
+            *st.antigravity.lock().unwrap() = snap.clone();
+            persist(&snap);
+            let _ = app.emit("antigravity", &snap);
+        }
+    });
+
+    request_refresh();
+}
+
+fn start_legacy(app: AppHandle) {
+    std::thread::spawn(move || {
+        {
+            let st = app.state::<AppState>();
+            let snap = st.antigravity.lock().unwrap().clone();
+            let _ = app.emit("antigravity", &snap);
+        }
+        if !legacy_present() {
             broadcast(&app, UsageSnapshot { status: "absent".into(), ..Default::default() });
             loop {
                 sleep_interruptible(600);
-                if present() {
+                if legacy_present() {
                     break;
                 }
             }
@@ -604,14 +767,24 @@ pub fn start(app: AppHandle) {
 
 /// For doctor: contains no secrets
 pub fn probe() -> String {
-    let root = state_root().map(|p| p.display().to_string()).unwrap_or_default();
-    let has_root = state_root().map(|p| p.is_dir()).unwrap_or(false);
+    if let Some(agy) = crate::agy_cli::find_agy() {
+        format!("Antigravity: official CLI installed at {}", agy.display())
+    } else {
+        legacy_probe()
+    }
+}
+
+fn legacy_probe() -> String {
+    let roots = state_roots();
     let cred = read_credentials();
     let ep = discover();
     format!(
-        "Antigravity: state dir {} ({}) | Credential Manager gemini:antigravity {} | language_server {}",
-        root,
-        if has_root { "present" } else { "missing" },
+        "Antigravity: state dirs {} | Credential Manager gemini:antigravity {} | language_server {}",
+        if roots.is_empty() {
+            "none under ~/.gemini".to_string()
+        } else {
+            roots.iter().map(|p| p.display().to_string()).collect::<Vec<_>>().join(", ")
+        },
         match cred {
             Some(c) => format!("found ({}, {})", c.auth_method, if c.expired { "expired" } else { "valid" }),
             None => "not found".into(),
@@ -621,4 +794,129 @@ pub fn probe() -> String {
             None => "not running".into(),
         }
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{requests_in, state_roots_in};
+    use std::path::{Path, PathBuf};
+
+    struct Home(PathBuf);
+    impl Home {
+        fn new(name: &str) -> Self {
+            let p = std::env::temp_dir().join(format!("codenotch-ag-{}-{name}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&p);
+            std::fs::create_dir_all(p.join(".gemini")).unwrap();
+            Home(p)
+        }
+        fn flavour(&self, name: &str) -> PathBuf {
+            let d = self.0.join(".gemini").join(name);
+            std::fs::create_dir_all(&d).unwrap();
+            d
+        }
+    }
+    impl Drop for Home {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn names(roots: &[PathBuf]) -> Vec<String> {
+        roots.iter().map(|p| p.file_name().unwrap().to_string_lossy().into_owned()).collect()
+    }
+
+    fn trajectory(root: &Path, id: &str, lines: &[String]) {
+        let logs = root.join("brain").join(id).join(".system_generated").join("logs");
+        std::fs::create_dir_all(&logs).unwrap();
+        std::fs::write(logs.join("transcript.jsonl"), lines.join("\n")).unwrap();
+    }
+
+    fn step(source: &str, at: chrono::DateTime<chrono::Utc>) -> String {
+        format!(r#"{{"source":"{source}","created_at":"{}"}}"#, at.to_rfc3339())
+    }
+
+    fn today() -> chrono::NaiveDate {
+        chrono::Local::now().date_naive()
+    }
+
+    #[test]
+    fn no_gemini_directory_means_no_roots() {
+        let missing = std::env::temp_dir().join(format!("codenotch-ag-{}-missing", std::process::id()));
+        assert!(state_roots_in(&missing).is_empty());
+    }
+
+    #[test]
+    fn an_ide_only_install_is_found() {
+        let h = Home::new("ide");
+        h.flavour("antigravity-ide");
+        h.flavour("config");
+        assert_eq!(names(&state_roots_in(&h.0)), ["antigravity-ide"]);
+    }
+
+    #[test]
+    fn the_legacy_layout_still_works() {
+        let h = Home::new("legacy");
+        h.flavour("antigravity");
+        assert_eq!(names(&state_roots_in(&h.0)), ["antigravity"]);
+    }
+
+    #[test]
+    fn every_flavour_is_found_and_nothing_else() {
+        let h = Home::new("all");
+        for f in ["antigravity-cli", "antigravity", "antigravity-ide", "antigravity-backup", "config"] {
+            h.flavour(f);
+        }
+        std::fs::write(h.0.join(".gemini").join("antigravity-notes.txt"), "").unwrap();
+        assert_eq!(
+            names(&state_roots_in(&h.0)),
+            ["antigravity", "antigravity-backup", "antigravity-cli", "antigravity-ide"]
+        );
+    }
+
+    #[test]
+    fn requests_are_summed_across_installs() {
+        let h = Home::new("sum");
+        let now = chrono::Utc::now();
+        let old = now - chrono::TimeDelta::days(3);
+        trajectory(&h.flavour("antigravity-ide"), "a", &[step("MODEL", now), step("USER", now), step("MODEL", old)]);
+        trajectory(&h.flavour("antigravity-cli"), "b", &[step("MODEL", now), step("MODEL", now)]);
+        let (count, latest) = requests_in(&state_roots_in(&h.0), today());
+        assert_eq!(count, 3);
+        assert_eq!(latest, Some(now.timestamp_millis() as u64));
+    }
+
+    #[test]
+    fn an_empty_first_install_does_not_hide_the_next() {
+        // #84's trap: antigravity-ide/brain existed and was empty while the transcripts sat in
+        // antigravity-cli, so "the first that exists" read zero.
+        let h = Home::new("trap");
+        std::fs::create_dir_all(h.flavour("antigravity-ide").join("brain")).unwrap();
+        trajectory(&h.flavour("antigravity-cli"), "c", &[step("MODEL", chrono::Utc::now())]);
+        assert_eq!(requests_in(&state_roots_in(&h.0), today()).0, 1);
+    }
+
+    #[test]
+    fn lanes_are_grouped_by_model_and_named_five_hour_first() {
+        // The shape the language server answered with on a real machine
+        let reply = serde_json::json!({ "response": { "groups": [
+            { "displayName": "Gemini Models", "buckets": [
+                { "bucketId": "gemini-weekly", "remainingFraction": 0.97 },
+                { "bucketId": "gemini-5h", "remainingFraction": 1.0 } ] },
+            { "displayName": "Claude and GPT models", "buckets": [
+                { "bucketId": "3p-weekly", "remainingFraction": 1.0 },
+                { "bucketId": "3p-5h", "remainingFraction": 1.0 } ] } ] } });
+        let lanes: Vec<String> = super::windows_from_bridge(&reply)
+            .into_iter()
+            .map(|w| format!("{} › {} ({})", w.group.unwrap_or_default(), w.label, w.id))
+            .collect();
+        assert_eq!(
+            lanes,
+            [
+                "Gemini Models › 5-hour Limit (gemini-5h)",
+                "Gemini Models › Weekly Limit (gemini-weekly)",
+                "Claude and GPT models › 5-hour Limit (3p-5h)",
+                "Claude and GPT models › Weekly Limit (3p-weekly)",
+            ]
+        );
+    }
 }

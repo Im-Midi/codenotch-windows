@@ -17,6 +17,7 @@
 //!   - Antigravity: transcript.jsonl is appended during a run (each step is written only once it
 //!     completes, so status is always DONE and useless); written within the last 45 s = working
 //!     (the model can think for a long time between steps, hence the wide window).
+//!
 //! Polled every 2 s (upstream cadence), broadcast only on change. Cost discipline: database
 //! connections stay open, nothing is re-queried unless the file's mtime changed, the rollout tail
 //! is re-read only when its mtime changed, PowerShell runs only occasionally to find the network
@@ -182,7 +183,7 @@ fn cursor_activity(ctx: &mut Ctx) -> Vec<Activity> {
                 since,
             });
         }
-        out.sort_by(|a, b| b.since.cmp(&a.since));
+        out.sort_by_key(|a| std::cmp::Reverse(a.since));
         Some(out)
     })
 }
@@ -435,7 +436,7 @@ fn claude_io_bytes() -> Option<(u64, u64)> {
     let mut other = 0u64;
     let mut read = 0u64;
     let mut n = 0;
-    for (pid, _name) in maps.name.iter() {
+    for pid in maps.name.keys() {
         if *pid != net_pid {
             continue;
         }
@@ -497,10 +498,9 @@ fn claude_activity() -> Vec<Activity> {
 // ---------------- Antigravity ----------------
 
 fn antigravity_activity() -> Vec<Activity> {
-    let Some(root) = dirs::home_dir().map(|h| h.join(".gemini").join("antigravity").join("brain")) else { return vec![] };
-    let Ok(rd) = std::fs::read_dir(&root) else { return vec![] };
     let mut newest: Option<(String, u64)> = None;
-    for e in rd.flatten() {
+    let brains = crate::antigravity::state_roots().into_iter().filter_map(|r| std::fs::read_dir(r.join("brain")).ok());
+    for e in brains.flat_map(|rd| rd.flatten()) {
         let t = e.path().join(".system_generated").join("logs").join("transcript.jsonl");
         let Some(m) = mtime_ms(&t) else { continue };
         if newest.as_ref().map(|(_, n)| m > *n).unwrap_or(true) {
@@ -596,7 +596,7 @@ pub fn start(app: AppHandle) {
         let mut tick: u32 = 0;
         loop {
             // Presence checks (finding the exe, reading credentials) once a minute are plenty; the 2 s tick does only stats and a query
-            if tick % 30 == 0 {
+            if tick.is_multiple_of(30) {
                 pres = presence();
             }
             tick = tick.wrapping_add(1);
